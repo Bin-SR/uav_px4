@@ -1,0 +1,10 @@
+{
+  "explanation": "起飞至2米，以起飞点为中心绕边长6米的正方形一圈，机头持续朝中心。3m/s为巡航目标，顶点减速。俯仰0度仅作为水平飞行意图，由PX4位置/姿态环跟踪，无法严格保证。完成后悬停等待。",
+  "attitude": {"pitch_deg": 0, "strict": false},
+  "actions": [
+    {"action": "takeoff", "height": 2, "speed": 1},
+    {"action": "square", "side": 6, "height": 2, "speed": 3,
+     "center": "takeoff", "heading": "center", "laps": 1,
+     "clockwise": true, "rotation_deg": 0}
+  ]
+}

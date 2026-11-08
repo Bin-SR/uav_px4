@@ -4,6 +4,7 @@ import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 
 import rclpy
 from rclpy.node import Node
@@ -11,16 +12,29 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import String
 from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint, VehicleCommand,
                           VehicleCommandAck, VehicleLocalPosition, VehicleStatus,
-                          VehicleLandDetected)
-from .planner import request_plan, target_for
+                          VehicleLandDetected, VehicleAttitude)
+from .planner import request_plan, target_for, validate_plan, SHAPES
+from .trajectory import Circuit, Line, Waypoints, bearing, wrap
 
 
 class LLMControl(Node):
     def __init__(self):
         super().__init__('px4_llm_control')
         for name, value in {'model': 'deepseek-chat', 'base_url': 'https://api.deepseek.com',
-                            'api_timeout': 30.0, 'dry_run': False}.items():
+                            'api_timeout': 60.0, 'dry_run': False, 'max_tokens': 8192,
+                            'max_acceleration': 2.0, 'max_yaw_rate_deg': 90.0}.items():
             self.declare_parameter(name, value)
+        self.acceleration = float(self.get_parameter('max_acceleration').value)
+        self.yaw_rate = math.radians(float(self.get_parameter('max_yaw_rate_deg').value))
+        if not 0.1 <= self.acceleration <= 4 or not 5 <= math.degrees(self.yaw_rate) <= 180:
+            raise ValueError('max_acceleration范围0.1到4，max_yaw_rate_deg范围5到180')
+        self.motion = None
+        self.velocity, self.acceleration_ff = [0.0]*3, [0.0]*3
+        self.yawspeed = 0.0
+        self.motion_time = 0.0
+        self.last_tick = time.monotonic()
+        self.attitude = None
+        self.pitch_request = None
         self.key = os.environ.get('DEEPSEEK_API_KEY', '')
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.future = None
@@ -32,7 +46,7 @@ class LLMControl(Node):
         self.yaw = 0.0
         self.resets = None
         self.phase = 'idle'
-        self.actions = []
+        self.actions = deque()
         self.step = None
         self.started = time.monotonic()
         self.last_command = 0.0
@@ -46,13 +60,16 @@ class LLMControl(Node):
         for cls, topic, name in [
             (VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1', 'position'),
             (VehicleStatus, '/fmu/out/vehicle_status_v5', 'status'),
-            (VehicleLandDetected, '/fmu/out/vehicle_land_detected', 'land')]:
+            (VehicleLandDetected, '/fmu/out/vehicle_land_detected', 'land'),
+            (VehicleAttitude, '/fmu/out/vehicle_attitude', 'attitude')]:
             self.create_subscription(cls, topic, lambda msg, n=name: self.telemetry(n, msg), qos)
         self.create_subscription(VehicleCommandAck, '/fmu/out/vehicle_command_ack_v2', self.ack, qos)
         self.events = self.create_publisher(String, '/px4_llm/status', 10)
         self.plans = self.create_publisher(String, '/px4_llm/plan', 10)
         self.create_subscription(String, '/px4_llm/command', self.instruction, 10)
         self.create_subscription(String, '/px4_llm/emergency', self.emergency, 10)
+        self.feedback_pub = self.create_publisher(String, '/px4_llm/feedback', 10)
+        self.create_timer(0.5, self.feedback)
         self.create_timer(0.05, self.tick)
         self.event('ready', '订阅 /px4_llm/command；仅用于 SITL。请关闭其他 Offboard 控制器。')
 
@@ -86,8 +103,8 @@ class LLMControl(Node):
 
     def instruction(self, msg):
         text = msg.data.strip()
-        if not text or len(text) > 2000:
-            self.event('rejected', '指令长度必须为1到2000字符'); return
+        if not text:
+            self.event('rejected', '指令不能为空'); return
         if self.future is not None or self.actions or self.step or self.phase not in ('idle', 'hold'):
             self.event('busy', '已有推理或动作执行；需要打断请使用 emergency'); return
         if not self.key:
@@ -99,17 +116,21 @@ class LLMControl(Node):
         self.pending_generation = self.generation
         self.future = self.pool.submit(request_plan, text,
             {'position_ned': self.xyz(), 'heading_deg': math.degrees(self.position.heading),
-             'airborne': bool(self.owned), 'phase': self.phase}, self.key,
+             'airborne': bool(self.owned), 'phase': self.phase,
+             'takeoff_origin_ned': self.origin,
+             'max_acceleration_m_s2': self.acceleration}, self.key,
             self.get_parameter('model').value, self.get_parameter('base_url').value,
-            float(self.get_parameter('api_timeout').value))
+            float(self.get_parameter('api_timeout').value),
+            int(self.get_parameter('max_tokens').value))
         self.event('planning', text)
 
     def emergency(self, msg):
         if msg.data.strip().lower() not in ('land', 'stop'):
             self.event('rejected', 'emergency 支持 land 或 stop'); return
         self.generation += 1  # Discard any late network result.
-        self.actions = []
+        self.actions = deque()
         self.step = None
+        self.clear_motion()
         if msg.data.strip().lower() == 'land':
             self.begin_land('用户要求降落')
         elif self.owned and self.valid() and self.phase != 'landing':
@@ -140,12 +161,13 @@ class LLMControl(Node):
 
     def begin_land(self, reason):
         self.generation += 1
-        self.actions, self.step = [], None
+        self.actions, self.step = deque(), None
+        self.clear_motion()
         self.phase, self.started, self.last_command = 'landing', time.monotonic(), 0.0
         self.event('landing', reason)
 
     def accept(self, plan):
-        actions = plan['actions']
+        actions = validate_plan(plan)
         self.plans.publish(String(data=json.dumps(plan, ensure_ascii=False)))
         if not actions:
             self.event('rejected', plan['explanation']); return
@@ -165,11 +187,26 @@ class LLMControl(Node):
         # Validate the entire route before sending any flight command.
         for step in actions:
             if step['action'] != 'land':
-                pos, yaw = target_for(step, pos, yaw, origin)
+                motion = self.make_motion(step, pos, yaw, origin)
+                if motion is not None:
+                    pos = list(motion.end)
+                    if getattr(motion, 'heading', 'hold') == 'center':
+                        yaw = bearing(pos, motion.center, yaw)
+                    elif getattr(motion, 'heading', 'hold') == 'tangent':
+                        _, velocity, _ = motion.sample(max(0.0, motion.duration-0.001))
+                        if math.hypot(*velocity[:2]) > 1e-8:
+                            yaw = math.atan2(velocity[1], velocity[0])
+                else:
+                    pos, yaw = target_for(step, pos, yaw, origin)
+        self.pitch_request = plan.get('attitude', {}).get('pitch_deg')
+        if self.pitch_request is not None:
+            self.event('constraint_warning', '俯仰0度为参考意图，位置控制不能强制；加减速/转弯会倾斜，实际值见feedback')
+        if any(step['action'] in SHAPES for step in actions):
+            self.event('trajectory_notice', '速度为参考巡航目标；多边形顶点减速到零，圆形受向心加速度限速')
         if self.get_parameter('dry_run').value:
             self.event('dry_run', '计划校验通过，未发送控制命令'); return
         self.origin = origin
-        self.actions = list(actions)
+        self.actions = deque(actions)
         if not airborne and actions[0]['action'] == 'takeoff':
             self.target = self.xyz()
             self.yaw = self.position.heading
@@ -180,14 +217,61 @@ class LLMControl(Node):
 
     def next_step(self):
         if not self.actions:
+            self.clear_motion()
             self.step, self.phase = None, 'hold'
             self.event('completed', '任务完成，持续悬停，等待下一条指令'); return
-        self.step = self.actions.pop(0)
+        self.clear_motion()
+        self.step = self.actions.popleft()
         if self.step['action'] == 'land':
             self.begin_land('执行计划降落'); return
-        self.target, self.yaw = target_for(self.step, self.xyz(), self.position.heading, self.origin)
+        self.motion = self.make_motion(self.step, self.xyz(), self.position.heading, self.origin)
+        if self.motion is not None:
+            self.target, self.velocity, self.acceleration_ff = self.motion.sample(0)
+            self.yaw = self.position.heading
+        else:
+            self.target, self.yaw = target_for(self.step, self.xyz(), self.position.heading, self.origin)
         self.phase, self.started, self.reached = 'executing', time.monotonic(), None
         self.event('executing', self.step)
+        if self.motion is not None:
+            self.event('trajectory', {'duration_s': self.motion.duration,
+                                     'cruise_m_s': getattr(self.motion, 'speed', self.step.get('speed', 1.0))})
+
+    def clear_motion(self):
+        self.motion = None
+        self.motion_time = 0.0
+        self.velocity, self.acceleration_ff = [0.0]*3, [0.0]*3
+        self.yawspeed = 0.0
+
+    def make_motion(self, step, position, yaw, origin):
+        if step['action'] in SHAPES:
+            return Circuit(step, position, origin, self.acceleration)
+        if step['action'] == 'path':
+            return Waypoints(step, position, origin, self.acceleration)
+        if step['action'] in ('takeoff', 'move'):
+            end, _ = target_for(step, position, yaw, origin)
+            # Conservative vertical rate for takeoff/relative climbing segments.
+            speed = step.get('speed', 1.0)
+            if abs(end[2]-position[2]) > 0.01:
+                speed = min(speed, 2.0)
+            return Line(position, end, speed, self.acceleration)
+        return None
+
+    def feedback(self):
+        if not self.fresh('position'):
+            return
+        pitch = None
+        if self.fresh('attitude'):
+            w, x, y, z = self.attitude.q
+            pitch = math.degrees(math.asin(max(-1.0, min(1.0, 2*(w*y-z*x)))))
+        detail = {'phase': self.phase, 'position_ned': self.xyz(),
+                  'reference_ned': self.target, 'velocity_reference': self.velocity,
+                  'actual_speed_m_s': math.hypot(self.position.vx, self.position.vy, self.position.vz),
+                  'yaw_reference_deg': math.degrees(self.yaw),
+                  'yaw_actual_deg': math.degrees(self.position.heading),
+                  'pitch_actual_deg': pitch, 'pitch_request_deg': self.pitch_request,
+                  'pitch_enforced': False, 'motion_time_s': self.motion_time,
+                  'remaining_actions': len(self.actions)}
+        self.feedback_pub.publish(String(data=json.dumps(detail, ensure_ascii=False)))
 
     def stream(self):
         stamp = self.get_clock().now().nanoseconds // 1000
@@ -195,12 +279,16 @@ class LLMControl(Node):
         self.mode_pub.publish(mode)
         msg = TrajectorySetpoint()
         msg.timestamp, msg.position = stamp, [float(v) for v in self.target]
-        msg.velocity = msg.acceleration = msg.jerk = [math.nan] * 3
-        msg.yaw, msg.yawspeed = float(self.yaw), math.nan
+        msg.velocity = [float(v) for v in self.velocity]
+        msg.acceleration = [float(v) for v in self.acceleration_ff]
+        msg.jerk = [math.nan] * 3
+        msg.yaw, msg.yawspeed = float(self.yaw), float(self.yawspeed)
         self.setpoint_pub.publish(msg)
 
     def tick(self):
         now = time.monotonic()
+        dt = min(max(now-self.last_tick, 0.0), 0.1)
+        self.last_tick = now
         if self.future is not None and self.future.done():
             future, self.future = self.future, None
             if self.pending_generation == self.generation:
@@ -225,9 +313,29 @@ class LLMControl(Node):
             self.begin_land('遥测过期/位置重置/失效保护，取消任务并请求降落'); return
         if self.owned and (not self.armed() or self.status.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD):
             self.generation += 1
-            self.actions, self.step = [], None
+            self.actions, self.step = deque(), None
             self.phase, self.owned = 'idle', False
             self.event('released', '已离开 Offboard 或上锁，停止输出；通过 QGC 接管'); return
+        if self.phase == 'executing' and self.motion is not None:
+            tracking_error = math.dist(self.xyz(), self.target)
+            if tracking_error > 4:
+                self.begin_land('轨迹跟踪误差超过4米'); return
+            # Pause reference progress if PX4 lags; continue the heartbeat and hold reference.
+            paused = tracking_error > 1.5 or abs(wrap(self.position.heading-self.yaw)) > math.radians(40)
+            if not paused:
+                self.motion_time += dt
+            self.target, self.velocity, self.acceleration_ff = self.motion.sample(self.motion_time)
+            if paused:
+                self.velocity, self.acceleration_ff = [0.0]*3, [0.0]*3
+            desired_yaw = self.yaw
+            heading = getattr(self.motion, 'heading', 'hold')
+            if heading == 'center':
+                desired_yaw = bearing(self.xyz(), self.motion.center, self.yaw)
+            elif heading == 'tangent' and math.hypot(*self.velocity[:2]) > 0.05:
+                desired_yaw = math.atan2(self.velocity[1], self.velocity[0])
+            change = max(-self.yaw_rate*dt, min(self.yaw_rate*dt, wrap(desired_yaw-self.yaw)))
+            self.yaw = wrap(self.yaw+change)
+            self.yawspeed = change/dt if dt else 0.0
         self.stream()
         if self.phase in ('prestream', 'mode', 'arm') and now - self.started > 15:
             self.begin_land('Offboard/解锁超时，请检查 ACK 和 QGC'); return
@@ -249,13 +357,17 @@ class LLMControl(Node):
             elif now - self.last_command > 1:
                 self.command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1)
         elif self.phase == 'executing':
-            if now - self.started > 180:
+            budget = (self.motion.duration if self.motion is not None else self.step.get('seconds', 0)) + 120
+            if now - self.started > budget:
                 self.begin_land('动作执行超时'); return
             error = math.dist(self.xyz(), self.target)
-            yaw_error = abs(math.atan2(math.sin(self.position.heading - self.yaw),
-                                       math.cos(self.position.heading - self.yaw)))
+            arrival_yaw = self.yaw
+            if self.motion is not None and getattr(self.motion, 'heading', 'hold') == 'center':
+                arrival_yaw = bearing(self.xyz(), self.motion.center, self.yaw)
+            yaw_error = abs(wrap(self.position.heading-arrival_yaw))
             speed = math.sqrt(sum(v*v for v in (self.position.vx, self.position.vy, self.position.vz)))
-            arrived = error < 0.25 and yaw_error < math.radians(8) and speed < 0.3
+            trajectory_done = self.motion is None or self.motion_time >= self.motion.duration
+            arrived = trajectory_done and error < 0.25 and yaw_error < math.radians(8) and speed < 0.3
             if arrived:
                 if self.reached is None:
                     self.reached = now

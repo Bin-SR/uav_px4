@@ -169,7 +169,7 @@ Could not determine the type for the passed topic
 切换到(**REQUEST_ARM**)的判断：检查CommandAck的command, 检查status的nav_state是否变为NAVIGATION_STATE_OFFBOARD  
 4.请求解锁(状态：REQUEST_ARM)  
 切换到(**TAKEOFF**)的判断：检查CommandAck的command, 检查status的arming_state是否变为ARMING_STATE_ARMED  
-5.起飞到指定高度，保持偏航角(状态：TAKEOFF)
+5.起飞到指定高度，保持偏航角(状态：TAKEOFF)  
 6.悬停指定秒数(状态：HOVER)  
 7.发送降落命令(状态：LAND)  
 检测降落，PX4自动上锁，若没有上锁，则进入状态：REQUEST_DISARM  
