@@ -1,0 +1,24 @@
+# Python / ROS build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+install/
+log/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor / OS temporary files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
