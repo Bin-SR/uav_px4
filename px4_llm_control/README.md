@@ -178,3 +178,11 @@ ros2 run px4_llm_control llm_control --ros-args \
   大量绕行用laps表达，不在内存中展开每一圈。模型输出截断会拒绝整个计划，不执行半份任务。
 
 参考：https://docs.px4.io/main/en/flight_modes/offboard （位置设定点与速度/加速度前馈）。
+
+## 多模态节点（新增）
+
+包内新增独立入口：`ros2 run px4_llm_control multimodal_model_control`。
+支持Qwen视觉API及Rex-Omni官方Python接口、RGB目标框、连续重检测关联、条件满足时的RGBD三维目标，
+以及深度/激光/点云的前向距离诊断；当前不自动飞行或自主避障。
+运行配置与话题详见[MULTIMODAL.md](MULTIMODAL.md)，仿真环境方案见[GAZEBO_PLAN.md](GAZEBO_PLAN.md)。
+本次未修改Gazebo世界或传感器模型。

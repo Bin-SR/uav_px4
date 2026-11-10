@@ -1,0 +1,26 @@
+multimodal_model_control:
+  ros__parameters:
+    backend: openai
+    base_url: http://127.0.0.1:8000/v1
+    model: Qwen/Qwen2.5-VL-7B-Instruct
+    rgb_topic: /camera/image_raw
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera_info
+    scan_topic: /lidar/scan
+    points_topic: /lidar/points
+    inference_period: 1.0
+    max_image_side: 768
+    api_timeout: 20.0
+    max_result_age: 3.0
+    sensor_timeout: 1.0
+    sync_slop: 0.1
+    # Enable only after actual RGBD registration and rectification are verified.
+    depth_registered: false
+    images_rectified: false
+    optical_frame: ''
+    world_frame: map
+    depth_forward_facing: false
+    required_obstacle_sources: [depth]
+    scan_frame: lidar_link
+    points_frame: base_link
+    stop_distance: 2.0
