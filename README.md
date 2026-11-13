@@ -186,7 +186,97 @@ UAV根据目标位置，自主规划路线
 | RRT | 随机采样路径规划 |
 | RRT* | 渐近最优路径规划 |
 | Minimum Snap | 四旋翼平滑轨迹生成 |
-| MPC | 模型预测控制 |
+| MPC | 模型预测控制 |  
+
+#### 3.1 在gazebo环境中添加一些物体 启动带深度相机的无人机  
+修正本机的桥接版本  
+ 查到你的 Gazebo 是 Harmonic 8.15，但已安装的桥接库链接的是 Fortress 的 ignition-transport11/msgs8。应该安装与 Harmonic 匹配的版本，这是 PX4 官方说明的配置方式。  
+```
+sudo apt update
+sudo apt install ros-humble-ros-gzharmonic
+```  
+启动仿真：`PX4_GZ_WORLD=default2 make px4_sitl gz_x500_depth`  
+检查gz中的一些关于相机的话题：`gz topic -l | grep -E 'image|camera_info|depth|points|clock'`  
+会有如下之类的话题： 
+```
+/depth_camera
+/depth_camera/points
+/model/x500_depth_0/command/gimbal_pitch
+```  
+把相机数据桥接到ROS2：  
+```
+RGB_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
+RGB_CAMERA_INFO_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
+DEPTH_CAMERA_INFO_TOPIC='/camera_info'
+
+ros2 run ros_gz_bridge parameter_bridge \
+  "${RGB_TOPIC}@sensor_msgs/msg/Image[gz.msgs.Image" \
+  "${RGB_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  "${DEPTH_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  '/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image' \
+  '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked' \
+  '/world/default2/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock' \
+  --ros-args \
+  -r "${RGB_TOPIC}:=/camera/image_raw" \
+  -r "${RGB_CAMERA_INFO_TOPIC}:=/camera/camera_info" \              
+  -r "${DEPTH_CAMERA_INFO_TOPIC}:=/camera/depth/camera_info" \  
+  -r /depth_camera:=/camera/depth/image_raw \
+  -r /depth_camera/points:=/camera/depth/points \
+  -r /world/default2/clock:=/clock
+```  
+注：这里 [ 表示 Gazebo → ROS 的单向桥接。桥接程序需要保持运行  
+在桥接的时候，第一次的命令没有加入/camera_info话题，所以在后面通过ros2检查topic时，没看到/camera_info  
+/camera_info话题主要是发布一下相机的内参，在进行相机坐标系的3D坐标解算时，需要内参的参数  
+第二次：现在只加入了RGB的camera_info，但是目前RGB和Depth的分辨率不同
+
+在另一个终端检查ROS话题：  
+```
+ros2 topic list
+ros2 topic hz /camera/image_raw
+```  
+一切正常，则打开Rviz：`rviz2 --ros-args -p use_sim_time:=true`  
+在Rviz界面，分别加入两个Image和一个PointCloud2,选择对应的话题  
+注意PointCloud2可能会不显示效果，原因在于可能Fixed Frame当前是map，使用命令查看点云自身的坐标系：  
+`ros2 topic echo /camera/depth/points --once --field header --qos-reliability best_effort`  
+将 RViz 的 Global Options → Fixed Frame 设置为输出的 frame_id；如果输出是 camera_link，就填 camera_link。这样先在传感器坐标系下查看点云  
+
+#### 3.2 几个gz和ROS2桥接的相机话题，对RGB、Depth、PointCloud数据的处理  
+通过`ros2 topic type /topic`查看话题内容的消息类型  
+通过`ros2 topic echo /topic --once`查看一次话题内容，看一下image的encoding和像素(w,h)
+```
+/camera/camera_info
+/camera/depth/image_raw : sensor_msgs/msg/Image  
+/camera/depth/points    : sensor_msgs/msg/PointCloud2  
+/camera/image_raw       : sensor_msgs/msg/Image  
+
+```  
+根据目标点与相机内参,计算相机坐标系下的3D坐标  
+pkg:uav_rgbd_perception  
+  -node:rgb_detector  
+  -node:depth_processor  
+运行节点:  
+```
+source install/setup.bash
+ros2 run uav_rgbd_perception rgb_detector       # 获取RGB图像，并识别红色箱子顶部，标出中心点并发布，topic:/red_box/center_pixel
+ros2 run uav_rgbd_perception depth_processor    # 获取Depth图像，并订阅中心点，返回深度
+```
+**问题1：RGB 和 Depth 分辨率不一致**  
+RGB中，height: 1080, width: 1920
+Depth中，height: 480, width: 640, encoding: 32FC1
+运行报错：中心点坐标超过了Depth图像的分辨率  
+RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
+| 参数 | RGB | Depth |
+|---|---:|---:|
+| Width | 1920 | 640 |
+| Height | 1080 | 480 |
+| fx | 1397.224 | 432.496 |
+| fy | 1397.224 | 432.496 |
+| cx | 960 | 320 |
+| cy | 540 | 240 |  
+
+
+
+
 ### Step4: 环境感知与自主避障
 理解并使用各种传感器： RGBD, LiDar, IMU, GPS等  
 算法： 点云处理，深度图处理，障碍物检测，栅格地图， 障碍距离估计
@@ -246,3 +336,40 @@ ros2 topic echo /fmu/out/vehicle_attitude
 ```
 
 
+RGB_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
+RGB_CAMERA_INFO_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
+DEPTH_CAMERA_INFO_TOPIC='/camera_info'
+
+ros2 run ros_gz_bridge parameter_bridge \
+  "${RGB_TOPIC}@sensor_msgs/msg/Image[gz.msgs.Image" \
+  "${RGB_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  "${DEPTH_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  '/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image' \
+  '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked' \
+  '/world/default2/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock' \
+  --ros-args \
+  -r "${RGB_TOPIC}:=/camera/image_raw" \
+  -r "${RGB_CAMERA_INFO_TOPIC}:=/camera/camera_info" \
+  -r "${DEPTH_CAMERA_INFO_TOPIC}:=/camera/depth/camera_info" \
+  -r /depth_camera:=/camera/depth/image_raw \
+  -r /depth_camera/points:=/camera/depth/points \
+  -r /world/default2/clock:=/clock
+
+RGB_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
+RGB_CAMERA_INFO_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
+DEPTH_CAMERA_INFO_TOPIC='/camera_info'
+
+ros2 run ros_gz_bridge parameter_bridge \
+  "${RGB_TOPIC}@sensor_msgs/msg/Image[gz.msgs.Image" \
+  "${RGB_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  "${DEPTH_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  '/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image' \
+  '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked' \
+  '/world/default2/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock' \
+  --ros-args \
+  -r "${RGB_TOPIC}:=/camera/image_raw" \
+  -r "${RGB_CAMERA_INFO_TOPIC}:=/camera/camera_info" \              
+  -r "${DEPTH_CAMERA_INFO_TOPIC}:=/camera/depth/camera_info" \  
+  -r /depth_camera:=/camera/depth/image_raw \
+  -r /depth_camera/points:=/camera/depth/points \
+  -r /world/default2/clock:=/clock
