@@ -24,8 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'rgb_detector    = uav_rgbd_perception.rgb_detector_node:main',
-            'depth_processor = uav_rgbd_perception.depth_processor_node:main',
+            'rgb_detector         = uav_rgbd_perception.rgb_detector_node:main',
+            'depth_processor      = uav_rgbd_perception.depth_processor_node:main',
+            'pointcloud_processor = uav_rgbd_perception.pointcloud_processor_node:main ',
         ],
     },
 )

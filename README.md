@@ -177,6 +177,9 @@ Could not determine the type for the passed topic
 再判断是否上锁，从而进入FINISH
 9.FINISH/ERROR  
 
+##### 2.4 通过LLM(Deepseek的API),资源语言控制无人机动作  
+详见~/uav/learn/ws/src/px4_llm_control/README.md
+
 ### Step3: 无人机自主导航与轨迹规划
 UAV根据目标位置，自主规划路线
 | 算法 | 研究内容 |
@@ -241,10 +244,14 @@ ros2 topic hz /camera/image_raw
 将 RViz 的 Global Options → Fixed Frame 设置为输出的 frame_id；如果输出是 camera_link，就填 camera_link。这样先在传感器坐标系下查看点云  
 
 #### 3.2 几个gz和ROS2桥接的相机话题，对RGB、Depth、PointCloud数据的处理  
+##### RGBD  
 通过`ros2 topic type /topic`查看话题内容的消息类型  
-通过`ros2 topic echo /topic --once`查看一次话题内容，看一下image的encoding和像素(w,h)
-```
+通过`ros2 topic echo /topic --once`查看一次话题内容，看一下image的encoding和像素(w,h)  
+RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info  
+对两个info进行桥接，RGB->/camera/camera_info, Depth->/camera/depth/camera_info
+```ROS2 topic  
 /camera/camera_info
+/camera/depth/camera_info
 /camera/depth/image_raw : sensor_msgs/msg/Image  
 /camera/depth/points    : sensor_msgs/msg/PointCloud2  
 /camera/image_raw       : sensor_msgs/msg/Image  
@@ -253,13 +260,28 @@ ros2 topic hz /camera/image_raw
 根据目标点与相机内参,计算相机坐标系下的3D坐标  
 pkg:uav_rgbd_perception  
   -node:rgb_detector  
-  -node:depth_processor  
+  -node:depth_processor 
+  -node:pointcloud_processor 
 运行节点:  
 ```
 source install/setup.bash
-ros2 run uav_rgbd_perception rgb_detector       # 获取RGB图像，并识别红色箱子顶部，标出中心点并发布，topic:/red_box/center_pixel
-ros2 run uav_rgbd_perception depth_processor    # 获取Depth图像，并订阅中心点，返回深度
+# 获取RGB图像，并识别红色箱子，标出中心点并发布，topic:/red_box/center_pixel
+ros2 run uav_rgbd_perception rgb_detector   
+# 获取Depth图像，并订阅中心点，打印日志，相机坐标系下物体的三维坐标(被检测到的像素点的空间位置)    
+ros2 run uav_rgbd_perception depth_processor    
+```  
+##### PointCloud:  
+通过PointCloud2三维点云再获取一个坐标，和RGBG得到的坐标对比  
+pointcloud_processor节点的作用：订阅PointCloud2话题, 使用open3d显示点云, 根据红色箱子中心像素提取点云, 计算三维坐标, 与RGBD的结果做对比
+运行点云节点：  
 ```
+sed -i '1c#!/usr/bin/env python3' install/uav_rgbd_perception/lib/uav_rgbd_perception/pointcloud_processor
+ros2 run uav_rgbd_perception pointcloud_processor
+```
+
+
+
+
 **问题1：RGB 和 Depth 分辨率不一致**  
 RGB中，height: 1080, width: 1920
 Depth中，height: 480, width: 640, encoding: 32FC1
@@ -273,6 +295,9 @@ RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
 | fy | 1397.224 | 432.496 |
 | cx | 960 | 320 |
 | cy | 540 | 240 |  
+对两个info进行桥接，RGB->/camera/camera_info, Depth->/camera/depth/camera_info  
+在depth_processor_node.py中通过rgb_to_depth_pixel函数，把RGB图像中的坐标，映射到Depth图像中  
+
 
 
 

@@ -23,24 +23,20 @@ class RGBDetectorNode(Node):
         self.bridge = CvBridge()
 
         # RGB 图像订阅
-        self.image_sub = self.create_subscription(
-            Image,
-            '/camera/image_raw',
-            self.image_callback,
-            qos_profile_sensor_data
-        )
+        self.image_sub = self.create_subscription(Image, '/camera/image_raw', self.image_callback, qos_profile_sensor_data)
 
         # 发布红色箱子的中心像素
-        self.center_pub = self.create_publisher(
-            PointStamped,
-            '/red_box/center_pixel',
-            10
-        )
+        self.center_pub = self.create_publisher(PointStamped, '/red_box/center_pixel', 10)
 
-        self.get_logger().info(
-            'RGB Detector Node Started'
-        )
+        self.get_logger().info('RGB Detector Node Started')
 
+        # 创建可调整大小的窗口
+        cv2.namedWindow('RGB', cv2.WINDOW_NORMAL)
+        cv2.namedWindow('Mask', cv2.WINDOW_NORMAL)
+
+        # 设置初始窗口大小
+        cv2.resizeWindow('RGB', 640, 360)
+        cv2.resizeWindow('Mask', 640, 360)
     def image_callback(self, msg):
 
         try:
@@ -71,10 +67,16 @@ class RGBDetectorNode(Node):
         )
 
         # 红色在 HSV 中跨越 0 度，需要设置两个范围
-        lower_red1 = np.array([0, 100, 100])
+        # lower_red1 = np.array([0, 100, 100])
+        # upper_red1 = np.array([10, 255, 255])
+
+        # lower_red2 = np.array([160, 100, 100])
+        # upper_red2 = np.array([180, 255, 255])
+
+        lower_red1 = np.array([0, 60, 50])
         upper_red1 = np.array([10, 255, 255])
 
-        lower_red2 = np.array([160, 100, 100])
+        lower_red2 = np.array([160, 60, 50])
         upper_red2 = np.array([180, 255, 255])
 
         # 创建红色掩膜
@@ -175,19 +177,12 @@ class RGBDetectorNode(Node):
                 self.center_pub.publish(
                     point_msg
                 )
-        cv2.resizeWindow('RGB', 400, 300)
-        cv2.resizeWindow('Mask', 800, 600)
+
         # 显示 RGB 图像
-        cv2.imshow(
-            'RGB',
-            image
-        )
+        cv2.imshow('RGB', image)
 
         # 显示红色掩膜
-        cv2.imshow(
-            'Mask',
-            mask
-        )
+        cv2.imshow('Mask', mask)
 
         cv2.waitKey(1)
 

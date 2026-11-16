@@ -45,6 +45,7 @@ source /opt/ros/humble/setup.bash
 source /home/si/uav/learn/ws/install/setup.bash
 read -rsp 'DeepSeek API Key: ' DEEPSEEK_API_KEY; echo
 export DEEPSEEK_API_KEY
+test -n "$DEEPSEEK_API_KEY" && echo "API Key 已设置"  # 用于测试是否设置成功
 ros2 run px4_llm_control llm_control
 ```
 

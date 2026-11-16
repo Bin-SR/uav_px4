@@ -116,34 +116,21 @@ class DepthProcessorNode(Node):
         #     f'cy={self.depth_cy:.2f}'
         # )
 
+    # 将 RGB 像素转换为归一化成像平面坐标，再映射到 Depth 图像
+    # 前提：RGB 和 Depth 相机的光心、朝向基本一致，且没有明显的相对平移和旋转
     def rgb_to_depth_pixel(self, u_rgb, v_rgb):
 
         # 确保两组相机内参都已获取
-        if (
-            self.rgb_fx is None
-            or self.depth_fx is None
-        ):
+        if (self.rgb_fx is None or self.depth_fx is None):
             return None, None
 
         # RGB 像素 -> 归一化坐标
-        x_norm = (
-            u_rgb - self.rgb_cx
-        ) / self.rgb_fx
-
-        y_norm = (
-            v_rgb - self.rgb_cy
-        ) / self.rgb_fy
+        x_norm = (u_rgb - self.rgb_cx) / self.rgb_fx
+        y_norm = (v_rgb - self.rgb_cy) / self.rgb_fy
 
         # 归一化坐标 -> Depth 像素
-        u_depth = (
-            self.depth_fx * x_norm
-            + self.depth_cx
-        )
-
-        v_depth = (
-            self.depth_fy * y_norm
-            + self.depth_cy
-        )
+        u_depth = (self.depth_fx * x_norm + self.depth_cx)
+        v_depth = (self.depth_fy * y_norm + self.depth_cy)
 
         return int(round(u_depth)), int(round(v_depth))
 
@@ -228,7 +215,7 @@ class DepthProcessorNode(Node):
             
 
         # 提取中心区域
-        radius = 2
+        radius = 4
 
         u1 = max(0, u - radius)
         u2 = min(width, u + radius + 1)
