@@ -588,8 +588,14 @@ class PointCloudProcessorNode(Node):
             & (roi > 0.0)
         ]
 
+        # if valid.size == 0:
+        #     return None
+
         if valid.size == 0:
-            return None
+            self.get_logger().warning(
+                f'No valid depth around '
+                f'pixel ({u},{v})')
+            return
 
         Z = float(np.median(valid))
 
@@ -731,13 +737,45 @@ class PointCloudProcessorNode(Node):
     def process_target(self):
 
         # 检查必要数据
-        if (
-            self.pixel_u is None
-            or self.cloud_xyz is None
-            or self.depth_image is None
-            or self.rgb_fx is None
-            or self.depth_fx is None
-        ):
+        # if (
+        #     self.pixel_u is None
+        #     or self.cloud_xyz is None
+        #     or self.depth_image is None
+        #     or self.rgb_fx is None
+        #     or self.depth_fx is None
+        # ):
+
+        #     return
+
+        if self.pixel_u is None:
+
+            self.get_logger().warning(
+                'Waiting for RGB detection result'
+            )
+
+            return
+
+        if self.cloud_xyz is None:
+
+            self.get_logger().warning(
+                'Waiting for PointCloud2'
+            )
+
+            return
+
+        if self.depth_image is None:
+
+            self.get_logger().warning(
+                'Waiting for Depth Image'
+            )
+
+            return
+
+        if self.rgb_fx is None or self.depth_fx is None:
+
+            self.get_logger().warning(
+                'Waiting for CameraInfo'
+            )
 
             return
 
@@ -802,12 +840,27 @@ class PointCloudProcessorNode(Node):
             axis=0
         )
 
+
+        # ********** 
+        # ==========================================
+        # 坐标系转换
+        # RGB-D: Optical Frame
+        # PointCloud2: Camera Frame
+        # ==========================================
+
+        # Optical -> Camera
+        rgbd_point_camera = np.array([
+            rgbd_point[2],
+            -rgbd_point[0],
+            -rgbd_point[1]
+        ], dtype=np.float32)
+
         # ==========================================
         # 坐标比较
         # ==========================================
 
         error = np.linalg.norm(
-            cloud_point - rgbd_point
+            cloud_point - rgbd_point_camera
         )
 
         # 发布坐标
@@ -817,7 +870,8 @@ class PointCloudProcessorNode(Node):
         )
 
         self.publish_point(
-            rgbd_point,
+            # rgbd_point,
+            rgbd_point_camera, 
             'rgbd'
         )
 
@@ -840,10 +894,15 @@ class PointCloudProcessorNode(Node):
                 f'Depth Pixel: ({u}, {v})\n'
                 f'Cloud Points: {len(target_points)}\n\n'
 
-                f'RGB-D Position:\n'
+                f'RGB-D Optical Position:\n'
                 f'X={rgbd_point[0]:.3f}, '
                 f'Y={rgbd_point[1]:.3f}, '
                 f'Z={rgbd_point[2]:.3f}\n\n'
+
+                f'RGB-D Camera Position:\n'
+                f'X={rgbd_point_camera[0]:.3f}, '
+                f'Y={rgbd_point_camera[1]:.3f}, '
+                f'Z={rgbd_point_camera[2]:.3f}\n\n'
 
                 f'PointCloud Position:\n'
                 f'X={cloud_point[0]:.3f}, '

@@ -1,3 +1,10 @@
+# 工作空间的说明
+目前有了两个分支：master和vlm
+master是原始的工作空间  
+vlm分支上，是codex改的加入了多模态的代码，不过还没有编译  
+通过git status查看当前仓库的分支以及状态  
+通过git switch master 或者git switch vlm来切换分支
+
 ## make px4_sitl gz_x500,编译报错：
 ```
 CMake Error at /usr/lib/x86_64-linux-gnu/cmake/jsoncpp/jsoncppConfig.cmake:2 (cmake_policy):
@@ -279,7 +286,20 @@ sed -i '1c#!/usr/bin/env python3' install/uav_rgbd_perception/lib/uav_rgbd_perce
 ros2 run uav_rgbd_perception pointcloud_processor
 ```
 
-
+| 实验 | 实验名称 | 核心技术 | 当前进度 |
+|---|---|---|---|
+| 1 | 获取 RGB 图像 | ROS 2、OpenCV | 已完成 |
+| 2 | 获取 Depth 图像 | ROS 2、CvBridge | 已完成 |
+| 3 | 红色障碍物检测 | HSV、轮廓检测 | 已完成 |
+| 4 | RGB-D 三维坐标计算 | CameraInfo、针孔模型 | 已初步完成 |
+| 5 | PointCloud2 三维点云验证 | PointCloud2、NumPy、Open3D | 下一步 |
+| 6 | 障碍物三维几何提取 | 点云分割、3D Bounding Box | 待完成 |
+| 7 | 坐标系转换 | TF2、静态外参、动态位姿 | 待完成 |
+| 8 | 局部三维地图构建 | Open3D、Voxel、Occupancy | 待完成 |
+| 9 | 无人机局部路径规划 | A*、避障、轨迹生成 | 待完成 |
+| 10 | PX4 Offboard 自主避障 | ROS 2、PX4、轨迹控制 | 待完成 |  
+**注**  
+实验5遗留问题：起飞后，点云停止更新数据，暂时还没有解决  
 
 
 **问题1：RGB 和 Depth 分辨率不一致**  
@@ -288,7 +308,7 @@ Depth中，height: 480, width: 640, encoding: 32FC1
 运行报错：中心点坐标超过了Depth图像的分辨率  
 RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
 | 参数 | RGB | Depth |
-|---|---:|---:|
+|---|---|---|
 | Width | 1920 | 640 |
 | Height | 1080 | 480 |
 | fx | 1397.224 | 432.496 |
@@ -297,6 +317,12 @@ RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
 | cy | 540 | 240 |  
 对两个info进行桥接，RGB->/camera/camera_info, Depth->/camera/depth/camera_info  
 在depth_processor_node.py中通过rgb_to_depth_pixel函数，把RGB图像中的坐标，映射到Depth图像中  
+**问题2：RGBD 和 PointCloud得到的两组坐标不一致**  
+如，在地面上，  
+RGBD得到的三维坐标：`(x, y, z) = (0.00, -0.71, 4.33)`  
+PiontCloud的坐标：`(x, y, z) = (4.33, 0.00, 0.71)`  
+通过坐标变换矩阵解决
+
 
 
 
