@@ -1,0 +1,20 @@
+pointcloud_processor_node:
+  ros__parameters:
+    voxel_size: 0.04
+    statistical_nb_neighbors: 20
+    statistical_std_ratio: 2.0
+    remove_ground_plane: true
+    plane_distance_threshold: 0.06
+    plane_ransac_n: 3
+    plane_num_iterations: 100
+    target_dbscan_eps: 0.10
+    target_dbscan_min_points: 8
+    scene_dbscan_eps: 0.18
+    scene_dbscan_min_points: 10
+    min_target_points: 30
+    min_cluster_points: 20
+    max_depth: 12.0
+    process_hz: 2.0
+    max_mask_cloud_dt: 0.25
+    visualize_open3d: true
+    publish_scene_clusters: true

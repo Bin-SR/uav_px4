@@ -1,324 +1,154 @@
 #!/usr/bin/env python3
-
 import cv2
 import numpy as np
-
 import rclpy
 from rclpy.node import Node
-
-from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import PointStamped
-
-from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PointStamped, PolygonStamped
+from cv_bridge import CvBridge
 
 
 class DepthProcessorNode(Node):
-
+    """
+    Keeps the original center-pixel RGB-D estimate for cross-checking.
+    The full 3-D bounding box is produced by pointcloud_processor_node.
+    RGB->Depth pixel mapping below is valid only for aligned/co-located RGB and depth optical axes.
+    """
     def __init__(self):
-
         super().__init__('depth_processor_node')
-
         self.bridge = CvBridge()
+        self.rgb_intrinsics = None
+        self.depth_intrinsics = None
+        self.center_uv = None
+        self.last_center_stamp = None
 
-        # RGB 相机内参
-        self.rgb_fx = None
-        self.rgb_fy = None
-        self.rgb_cx = None
-        self.rgb_cy = None
+        self.declare_parameter('depth_scale_16uc1', 0.001)
+        self.declare_parameter('center_roi_radius', 4)
+        self.declare_parameter('show_depth', True)
+        self.depth_scale = float(self.get_parameter('depth_scale_16uc1').value)
+        self.radius = int(self.get_parameter('center_roi_radius').value)
+        self.show_depth = bool(self.get_parameter('show_depth').value)
 
-        # Depth 相机内参
-        self.depth_fx = None
-        self.depth_fy = None
-        self.depth_cx = None
-        self.depth_cy = None
+        self.create_subscription(CameraInfo, '/camera/camera_info', self.rgb_info_cb, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, '/camera/depth/camera_info', self.depth_info_cb, qos_profile_sensor_data)
+        self.create_subscription(PointStamped, '/red_box/center_pixel', self.center_cb, 10)
+        self.create_subscription(Image, '/camera/depth/image_raw', self.depth_cb, qos_profile_sensor_data)
+        self.create_subscription(PolygonStamped, '/red_box/bbox', self.bbox_cb, 10)
 
-        # 红色箱子中心像素
-        self.pixel_u = None
-        self.pixel_v = None
+        self.rgbd_pub = self.create_publisher(PointStamped, '/red_box/rgbd_position', 10)
+        if self.show_depth:
+            cv2.namedWindow('Depth Image', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow('Depth Image', 640, 480)
+        self.get_logger().info('Depth Processor Node started')
 
-        # 深度单位换算系数
-        self.declare_parameter(
-            'depth_scale_16uc1',
-            0.001
-        )
+    def rgb_info_cb(self, msg):
+        self.rgb_intrinsics = (float(msg.k[0]), float(msg.k[4]), float(msg.k[2]), float(msg.k[5]))
 
-        self.depth_scale = float(
-            self.get_parameter(
-                'depth_scale_16uc1'
-            ).value
-        )
+    def depth_info_cb(self, msg):
+        self.depth_intrinsics = (float(msg.k[0]), float(msg.k[4]), float(msg.k[2]), float(msg.k[5]))
 
-        # Depth Image
-        self.depth_sub = self.create_subscription(
-            Image,
-            '/camera/depth/image_raw',
-            self.depth_callback,
-            qos_profile_sensor_data
-        )
+    def center_cb(self, msg):
+        self.center_uv = (int(round(msg.point.x)), int(round(msg.point.y)))
+        self.last_center_stamp = msg.header.stamp
 
-        # Camera Info
-        self.info_sub = self.create_subscription(
-            CameraInfo,
-            '/camera/camera_info',
-            self.rgb_info_callback,
-            qos_profile_sensor_data
-        )
-        # Depth 相机内参
-        self.depth_info_sub = self.create_subscription(
-            CameraInfo,
-            '/camera/depth/camera_info',
-            self.depth_info_callback,
-            qos_profile_sensor_data
-        )
+    def bbox_cb(self, msg):
+        # Reserved for future ROI diagnostics; the authoritative box reconstruction uses mask + organized cloud.
+        pass
 
-        # 红色箱子中心像素
-        self.pixel_sub = self.create_subscription(
-            PointStamped,
-            '/red_box/center_pixel',
-            self.pixel_callback,
-            10
-        )
+    def map_rgb_to_depth(self, u, v):
+        if self.rgb_intrinsics is None or self.depth_intrinsics is None:
+            return None
+        rfx, rfy, rcx, rcy = self.rgb_intrinsics
+        dfx, dfy, dcx, dcy = self.depth_intrinsics
+        if min(rfx, rfy, dfx, dfy) <= 0:
+            return None
+        xn = (u - rcx) / rfx
+        yn = (v - rcy) / rfy
+        return int(round(dfx * xn + dcx)), int(round(dfy * yn + dcy))
 
-        self.get_logger().info(
-            'Depth Processor Node Started'
-        )
-
-    # 获取相机内参
-    def rgb_info_callback(self, msg):
-
-        self.rgb_fx = msg.k[0]
-        self.rgb_fy = msg.k[4]
-
-        self.rgb_cx = msg.k[2]
-        self.rgb_cy = msg.k[5]
-
-        # self.get_logger().info(
-        #     f'RGB Intrinsics: '
-        #     f'fx={self.rgb_fx:.2f}, '
-        #     f'fy={self.rgb_fy:.2f}, '
-        #     f'cx={self.rgb_cx:.2f}, '
-        #     f'cy={self.rgb_cy:.2f}'
-        # )
-    def depth_info_callback(self, msg):
-
-        self.depth_fx = msg.k[0]
-        self.depth_fy = msg.k[4]
-
-        self.depth_cx = msg.k[2]
-        self.depth_cy = msg.k[5]
-
-        # self.get_logger().info(
-        #     f'Depth Intrinsics: '
-        #     f'fx={self.depth_fx:.2f}, '
-        #     f'fy={self.depth_fy:.2f}, '
-        #     f'cx={self.depth_cx:.2f}, '
-        #     f'cy={self.depth_cy:.2f}'
-        # )
-
-    # 将 RGB 像素转换为归一化成像平面坐标，再映射到 Depth 图像
-    # 前提：RGB 和 Depth 相机的光心、朝向基本一致，且没有明显的相对平移和旋转
-    def rgb_to_depth_pixel(self, u_rgb, v_rgb):
-
-        # 确保两组相机内参都已获取
-        if (self.rgb_fx is None or self.depth_fx is None):
-            return None, None
-
-        # RGB 像素 -> 归一化坐标
-        x_norm = (u_rgb - self.rgb_cx) / self.rgb_fx
-        y_norm = (v_rgb - self.rgb_cy) / self.rgb_fy
-
-        # 归一化坐标 -> Depth 像素
-        u_depth = (self.depth_fx * x_norm + self.depth_cx)
-        v_depth = (self.depth_fy * y_norm + self.depth_cy)
-
-        return int(round(u_depth)), int(round(v_depth))
-
-    
-    # 获取红色箱子中心像素
-    def pixel_callback(self, msg):
-
-        self.pixel_u = int(msg.point.x)
-        self.pixel_v = int(msg.point.y)
-
-    def depth_callback(self, msg):
-
-        # 检查是否已经获得 RGB 检测结果
-        if self.pixel_u is None:
+    def depth_cb(self, msg):
+        if self.center_uv is None:
             return
-
-        # 检查两组相机内参
-        if (
-            self.rgb_fx is None
-            or self.depth_fx is None
-        ):
+        if self.rgb_intrinsics is None or self.depth_intrinsics is None:
             return
-
-        # ROS Image -> NumPy
         try:
-
-            depth_image = self.bridge.imgmsg_to_cv2(
-                msg,
-                desired_encoding='passthrough'
-            )
-
-        except Exception as e:
-
-            self.get_logger().error(
-                f'Depth conversion failed: {e}'
-            )
-
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as exc:
+            self.get_logger().error(f'Depth conversion failed: {exc}')
             return
 
-        # 当前深度图是 32FC1，单位通常为米
         if msg.encoding == '32FC1':
-
-            depth_image = depth_image.astype(
-                np.float32
-            )
-
+            depth = depth.astype(np.float32, copy=False)
         elif msg.encoding == '16UC1':
-
-            depth_image = (
-                depth_image.astype(np.float32)
-                * self.depth_scale
-            )
-
+            depth = depth.astype(np.float32) * self.depth_scale
         else:
-
-            self.get_logger().error(
-                f'Unsupported encoding: {msg.encoding}'
-            )
-
+            self.get_logger().warning(f'Unsupported depth encoding: {msg.encoding}')
             return
 
-        # RGB 像素映射到 Depth 像素
-        u, v = self.rgb_to_depth_pixel(
-            self.pixel_u,
-            self.pixel_v
-        )
-
-        if u is None:
+        mapped = self.map_rgb_to_depth(*self.center_uv)
+        if mapped is None:
+            return
+        u, v = mapped
+        h, w = depth.shape
+        if not (0 <= u < w and 0 <= v < h):
+            self.get_logger().warning(f'Mapped depth pixel ({u},{v}) outside {w}x{h}; skip this frame')
             return
 
-        height, width = depth_image.shape
-
-        # 检查是否越界
-        if not (0 <= u < width and 0 <= v < height):
-
-            self.get_logger().warning(
-                f'Depth pixel out of bounds: '
-                f'({u},{v}), '
-                f'image size={width}x{height}'
-            )
-            exit()
-            
-
-        # 提取中心区域
-        radius = 4
-
-        u1 = max(0, u - radius)
-        u2 = min(width, u + radius + 1)
-
-        v1 = max(0, v - radius)
-        v2 = min(height, v + radius + 1)
-
-        roi = depth_image[v1:v2, u1:u2]
-
-        # 过滤无效深度
-        valid_depth = roi[
-            np.isfinite(roi) & (roi > 0.0)
-        ]
-
-        if valid_depth.size == 0:
-
-            self.get_logger().warning(
-                'No valid depth at target position'
-            )
-
+        x0, x1 = max(0, u-self.radius), min(w, u+self.radius+1)
+        y0, y1 = max(0, v-self.radius), min(h, v+self.radius+1)
+        roi = depth[y0:y1, x0:x1]
+        valid = roi[np.isfinite(roi) & (roi > 0.05)]
+        if valid.size == 0:
             return
 
-        # 中值滤波
-        Z = float(np.median(valid_depth))
+        z = float(np.median(valid))
+        dfx, dfy, dcx, dcy = self.depth_intrinsics
+        # Pinhole back-projection gives optical coordinates:
+        # X right, Y down, Z forward.
+        x_opt = (u - dcx) * z / dfx
+        y_opt = (v - dcy) * z / dfy
+        z_opt = z
 
-        # Depth 相机三维坐标
-        X = (
-            (u - self.depth_cx)
-            * Z / self.depth_fx
-        )
+        # Gazebo's camera_link convention is commonly X forward, Y left, Z up.
+        # Keep the output coordinates consistent with the PointCloud2 frame when
+        # the incoming depth frame is camera_link. Experiment 7 will replace this
+        # convention-specific conversion with an explicit TF transform.
+        if msg.header.frame_id.endswith('camera_link'):
+            xyz = (z_opt, -x_opt, -y_opt)
+        else:
+            xyz = (x_opt, y_opt, z_opt)
 
-        Y = (
-            (v - self.depth_cy)
-            * Z / self.depth_fy
-        )
+        out = PointStamped()
+        out.header = msg.header
+        out.point.x, out.point.y, out.point.z = map(float, xyz)
+        self.rgbd_pub.publish(out)
 
-        self.get_logger().info(
-            f'Red Box Position: '
-            # f'RGB=({self.pixel_u},{self.pixel_v}), '
-            # f'Depth=({u},{v}), '
-            f'X={X:.3f}m, '
-            f'Y={Y:.3f}m, '
-            f'Z={Z:.3f}m'
-        )
+        if self.show_depth:
+            disp = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+            disp = np.clip(disp / 8.0 * 255.0, 0, 255).astype(np.uint8)
+            disp = cv2.applyColorMap(disp, cv2.COLORMAP_JET)
+            cv2.circle(disp, (u, v), 5, (255, 255, 255), -1)
+            cv2.imshow('Depth Image', disp)
+            cv2.waitKey(1)
 
-        # 显示深度图
-        display = np.nan_to_num(
-            depth_image,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0
-        )
-
-        display = np.clip(
-            display / 5.0 * 255.0,
-            0,
-            255
-        ).astype(np.uint8)
-
-        display = cv2.applyColorMap(
-            display,
-            cv2.COLORMAP_JET
-        )
-
-        cv2.circle(
-            display,
-            (u, v),
-            5,
-            (255, 255, 255),
-            -1
-        )
-
-        cv2.imshow(
-            'Depth Image',
-            display
-        )
-
-        cv2.waitKey(1)
+    def destroy_node(self):
+        if self.show_depth:
+            cv2.destroyAllWindows()
+        super().destroy_node()
 
 
 def main(args=None):
-
     rclpy.init(args=args)
-
     node = DepthProcessorNode()
-
     try:
-
         rclpy.spin(node)
-
     except KeyboardInterrupt:
-
         pass
-
     finally:
-
         node.destroy_node()
-
-        cv2.destroyAllWindows()
-
         rclpy.shutdown()
 
 
 if __name__ == '__main__':
-
     main()

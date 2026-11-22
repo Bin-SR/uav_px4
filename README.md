@@ -29,6 +29,8 @@ make: *** [Makefile:250：px4_sitl] 错误 1
 ### 解决：
 `export CMAKE_POLICY_VERSION_MINIMUM=3.5`，之后再重新`make px4_sitl gz_x500`
 
+**查看PX4版本**  
+`git describe --tags --always`  
 ## 使用
 ### conda环境：
 `conda activate uav_px4`
@@ -306,7 +308,7 @@ ros2 run uav_rgbd_perception pointcloud_processor
 RGB中，height: 1080, width: 1920
 Depth中，height: 480, width: 640, encoding: 32FC1
 运行报错：中心点坐标超过了Depth图像的分辨率  
-RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
+RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info  
 | 参数 | RGB | Depth |
 |---|---|---|
 | Width | 1920 | 640 |
@@ -314,9 +316,11 @@ RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
 | fx | 1397.224 | 432.496 |
 | fy | 1397.224 | 432.496 |
 | cx | 960 | 320 |
-| cy | 540 | 240 |  
+| cy | 540 | 240 |   
+
 对两个info进行桥接，RGB->/camera/camera_info, Depth->/camera/depth/camera_info  
 在depth_processor_node.py中通过rgb_to_depth_pixel函数，把RGB图像中的坐标，映射到Depth图像中  
+
 **问题2：RGBD 和 PointCloud得到的两组坐标不一致**  
 如，在地面上，  
 RGBD得到的三维坐标：`(x, y, z) = (0.00, -0.71, 4.33)`  
@@ -406,8 +410,8 @@ ros2 run ros_gz_bridge parameter_bridge \
   -r /depth_camera/points:=/camera/depth/points \
   -r /world/default2/clock:=/clock
 
-RGB_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
-RGB_CAMERA_INFO_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
+RGB_TOPIC='/world/default2_experiment6/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
+RGB_CAMERA_INFO_TOPIC='/world/default2_experiment6/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
 DEPTH_CAMERA_INFO_TOPIC='/camera_info'
 
 ros2 run ros_gz_bridge parameter_bridge \
@@ -416,11 +420,11 @@ ros2 run ros_gz_bridge parameter_bridge \
   "${DEPTH_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
   '/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image' \
   '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked' \
-  '/world/default2/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock' \
+  '/world/default2_experiment6/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock' \
   --ros-args \
   -r "${RGB_TOPIC}:=/camera/image_raw" \
-  -r "${RGB_CAMERA_INFO_TOPIC}:=/camera/camera_info" \              
-  -r "${DEPTH_CAMERA_INFO_TOPIC}:=/camera/depth/camera_info" \  
+  -r "${RGB_CAMERA_INFO_TOPIC}:=/camera/camera_info" \
+  -r "${DEPTH_CAMERA_INFO_TOPIC}:=/camera/depth/camera_info" \
   -r /depth_camera:=/camera/depth/image_raw \
   -r /depth_camera/points:=/camera/depth/points \
-  -r /world/default2/clock:=/clock
+  -r /world/default2_experiment6/clock:=/clock

@@ -1,4 +1,6 @@
+import os
 from setuptools import find_packages, setup
+from glob import glob
 
 package_name = 'uav_rgbd_perception'
 
@@ -10,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -26,7 +30,7 @@ setup(
         'console_scripts': [
             'rgb_detector         = uav_rgbd_perception.rgb_detector_node:main',
             'depth_processor      = uav_rgbd_perception.depth_processor_node:main',
-            'pointcloud_processor = uav_rgbd_perception.pointcloud_processor_node:main ',
+            'pointcloud_processor = uav_rgbd_perception.pointcloud_processor_node:main',
         ],
     },
 )

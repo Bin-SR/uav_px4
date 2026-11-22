@@ -1,954 +1,422 @@
 #!/usr/bin/env python3
-
+import time
 import numpy as np
 import open3d as o3d
-
 import rclpy
 from rclpy.node import Node
-
-from sensor_msgs.msg import (
-    Image,
-    CameraInfo,
-    PointCloud2
-)
-
-from geometry_msgs.msg import PointStamped
-
-from visualization_msgs.msg import Marker
-
-from cv_bridge import CvBridge
-
 from rclpy.qos import qos_profile_sensor_data
-
+from sensor_msgs.msg import Image, PointCloud2, CameraInfo
 from sensor_msgs_py import point_cloud2
+from geometry_msgs.msg import PointStamped, Vector3Stamped
+from visualization_msgs.msg import Marker, MarkerArray
+from cv_bridge import CvBridge
 
 
 class PointCloudProcessorNode(Node):
-
     def __init__(self):
-
         super().__init__('pointcloud_processor_node')
-
         self.bridge = CvBridge()
-
-        # ==========================================
-        # 1. 相机内参
-        # ==========================================
-
-        # RGB 相机内参
-        self.rgb_fx = None
-        self.rgb_fy = None
-        self.rgb_cx = None
-        self.rgb_cy = None
-
-        # Depth 相机内参
-        self.depth_fx = None
-        self.depth_fy = None
-        self.depth_cx = None
-        self.depth_cy = None
-
-        self.rgb_frame_id = None
-        self.depth_frame_id = None
-
-        # ==========================================
-        # 2. RGB 检测结果
-        # ==========================================
-
-        self.pixel_u = None
-        self.pixel_v = None
-
-        # ==========================================
-        # 3. Depth 数据
-        # ==========================================
-
-        self.depth_image = None
-
-        self.depth_scale = 0.001
-
-        # ==========================================
-        # 4. PointCloud 数据
-        # ==========================================
-
-        self.cloud_xyz = None
-
-        self.cloud_width = 0
-        self.cloud_height = 0
-
-        self.cloud_frame_id = None
-        self.cloud_header = None
-
-        self.cloud_stamp = None
-        self.depth_stamp = None
-
-        # ==========================================
-        # 5. 参数
-        # ==========================================
-
-        self.declare_parameter(
-            'roi_radius',
-            4
-        )
-
-        self.declare_parameter(
-            'voxel_size',
-            0.04
-        )
-
-        self.declare_parameter(
-            'depth_scale_16uc1',
-            0.001
-        )
-
-        self.declare_parameter(
-            'visualize',
-            True
-        )
-
-        self.roi_radius = int(
-            self.get_parameter(
-                'roi_radius'
-            ).value
-        )
-
-        self.voxel_size = float(
-            self.get_parameter(
-                'voxel_size'
-            ).value
-        )
-
-        self.depth_scale = float(
-            self.get_parameter(
-                'depth_scale_16uc1'
-            ).value
-        )
-
-        self.visualize = bool(
-            self.get_parameter(
-                'visualize'
-            ).value
-        )
-
-        # ==========================================
-        # 6. ROS Subscribers
-        # ==========================================
-
-        self.rgb_info_sub = self.create_subscription(
-            CameraInfo,
-            '/camera/camera_info',
-            self.rgb_info_callback,
-            qos_profile_sensor_data
-        )
-
-        self.depth_info_sub = self.create_subscription(
-            CameraInfo,
-            '/camera/depth/camera_info',
-            self.depth_info_callback,
-            qos_profile_sensor_data
-        )
-
-        self.depth_sub = self.create_subscription(
-            Image,
-            '/camera/depth/image_raw',
-            self.depth_callback,
-            qos_profile_sensor_data
-        )
-
-        self.pixel_sub = self.create_subscription(
-            PointStamped,
-            '/red_box/center_pixel',
-            self.pixel_callback,
-            10
-        )
-
-        self.cloud_sub = self.create_subscription(
-            PointCloud2,
-            '/camera/depth/points',
-            self.cloud_callback,
-            qos_profile_sensor_data
-        )
-
-        # ==========================================
-        # 7. ROS Publishers
-        # ==========================================
-
-        self.cloud_point_pub = self.create_publisher(
-            PointStamped,
-            '/red_box/pointcloud_position',
-            10
-        )
-
-        self.rgbd_point_pub = self.create_publisher(
-            PointStamped,
-            '/red_box/rgbd_position',
-            10
-        )
-
-        self.marker_pub = self.create_publisher(
-            Marker,
-            '/red_box/pointcloud_marker',
-            10
-        )
-
-        # ==========================================
-        # 8. Open3D 初始化
-        # ==========================================
-
-        self.vis = None
-
-        self.pcd = None
-
-        self.geometry_added = False
-
-        self.pending_visualization = False
-
-        if self.visualize:
-
-            try:
-
-                self.vis = o3d.visualization.Visualizer()
-
-                self.vis.create_window(
-                    window_name='PointCloud2 - UAV RGBD',
-                    width=960,
-                    height=720
-                )
-
-                self.pcd = o3d.geometry.PointCloud()
-
-                self.get_logger().info(
-                    'Open3D visualization initialized'
-                )
-
-            except Exception as e:
-
-                self.get_logger().warning(
-                    f'Open3D initialization failed: {e}'
-                )
-
-                self.vis = None
-
-        # Open3D 窗口更新定时器
-        self.visualization_timer = self.create_timer(
-            0.03,
-            self.visualization_callback
-        )
-
-        # 限制日志频率
+        self.mask = None
+        self.mask_header = None
+        self.rgb_intrinsics = None
+        self.depth_intrinsics = None
+        self.last_process_time = 0.0
         self.last_log_time = 0.0
 
-        self.get_logger().info(
-            'PointCloud Processor Node Started'
-        )
+        # Tunable parameters: values are in metres unless noted.
+        defaults = {
+            'voxel_size': 0.04,
+            'statistical_nb_neighbors': 20,
+            'statistical_std_ratio': 2.0,
+            'remove_ground_plane': True,
+            'plane_distance_threshold': 0.06,
+            'plane_ransac_n': 3,
+            'plane_num_iterations': 100,
+            'target_dbscan_eps': 0.10,
+            'target_dbscan_min_points': 8,
+            'scene_dbscan_eps': 0.18,
+            'scene_dbscan_min_points': 10,
+            'min_target_points': 30,
+            'min_cluster_points': 20,
+            'max_depth': 12.0,
+            'process_hz': 2.0,
+            'max_mask_cloud_dt': 0.25,
+            'visualize_open3d': True,
+            'publish_scene_clusters': True,
+        }
+        for name, value in defaults.items():
+            self.declare_parameter(name, value)
+        p = lambda n: self.get_parameter(n).value
+        self.voxel_size = float(p('voxel_size'))
+        self.nb_neighbors = int(p('statistical_nb_neighbors'))
+        self.std_ratio = float(p('statistical_std_ratio'))
+        self.remove_ground_plane = bool(p('remove_ground_plane'))
+        self.plane_distance_threshold = float(p('plane_distance_threshold'))
+        self.plane_ransac_n = int(p('plane_ransac_n'))
+        self.plane_num_iterations = int(p('plane_num_iterations'))
+        self.target_eps = float(p('target_dbscan_eps'))
+        self.target_min_points = int(p('target_dbscan_min_points'))
+        self.scene_eps = float(p('scene_dbscan_eps'))
+        self.scene_min_points = int(p('scene_dbscan_min_points'))
+        self.min_target_points = int(p('min_target_points'))
+        self.min_cluster_points = int(p('min_cluster_points'))
+        self.max_depth = float(p('max_depth'))
+        self.process_period = 1.0 / max(0.1, float(p('process_hz')))
+        self.max_mask_cloud_dt = float(p('max_mask_cloud_dt'))
+        self.publish_scene_clusters = bool(p('publish_scene_clusters'))
+        self.visualize = bool(p('visualize_open3d'))
 
-    # ==================================================
-    # RGB CameraInfo
-    # ==================================================
+        self.create_subscription(Image, '/red_box/mask', self.mask_cb, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, '/camera/camera_info', self.rgb_info_cb, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, '/camera/depth/camera_info', self.depth_info_cb, qos_profile_sensor_data)
+        self.create_subscription(PointCloud2, '/camera/depth/points', self.cloud_cb, qos_profile_sensor_data)
 
-    def rgb_info_callback(self, msg):
+        self.position_pub = self.create_publisher(PointStamped, '/red_box/position', 10)
+        self.size_pub = self.create_publisher(Vector3Stamped, '/red_box/size', 10)
+        self.marker_pub = self.create_publisher(Marker, '/red_box/marker', 10)
+        self.target_cloud_pub = self.create_publisher(PointCloud2, '/red_box/points', 10)
+        self.filtered_cloud_pub = self.create_publisher(PointCloud2, '/pointcloud/filtered', 10)
+        self.cluster_marker_pub = self.create_publisher(MarkerArray, '/pointcloud/clusters', 10)
 
-        self.rgb_fx = msg.k[0]
-        self.rgb_fy = msg.k[4]
+        self.vis = None
+        self.vis_cloud = None
+        self.vis_geometries = []
+        if self.visualize:
+            try:
+                self.vis = o3d.visualization.Visualizer()
+                self.vis.create_window('UAV PointCloud Filtering and Clustering', 1100, 800)
+                self.vis_cloud = o3d.geometry.PointCloud()
+            except Exception as exc:
+                self.get_logger().warning(f'Open3D window unavailable: {exc}')
+                self.vis = None
 
-        self.rgb_cx = msg.k[2]
-        self.rgb_cy = msg.k[5]
+        self.timer = self.create_timer(0.03, self.visualization_spin)
+        self.pending_scene = None
+        self.get_logger().info('PointCloud Processor Node started')
 
-        self.rgb_frame_id = msg.header.frame_id
-
-        # self.get_logger().info(
-        #     f'RGB CameraInfo received: '
-        #     f'{msg.width}x{msg.height}, '
-        #     f'fx={self.rgb_fx:.2f}, '
-        #     f'fy={self.rgb_fy:.2f}'
-        # )
-
-    # ==================================================
-    # Depth CameraInfo
-    # ==================================================
-
-    def depth_info_callback(self, msg):
-
-        self.depth_fx = msg.k[0]
-        self.depth_fy = msg.k[4]
-
-        self.depth_cx = msg.k[2]
-        self.depth_cy = msg.k[5]
-
-        self.depth_frame_id = msg.header.frame_id
-
-        # self.get_logger().info(
-        #     f'Depth CameraInfo received: '
-        #     f'{msg.width}x{msg.height}, '
-        #     f'fx={self.depth_fx:.2f}, '
-        #     f'fy={self.depth_fy:.2f}'
-        # )
-
-    # ==================================================
-    # RGB Detector
-    # ==================================================
-
-    def pixel_callback(self, msg):
-
-        self.pixel_u = int(msg.point.x)
-        self.pixel_v = int(msg.point.y)
-
-    # ==================================================
-    # Depth Image
-    # ==================================================
-
-    def depth_callback(self, msg):
-
+    def mask_cb(self, msg):
         try:
+            self.mask = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+            self.mask_header = msg.header
+        except Exception as exc:
+            self.get_logger().error(f'Mask conversion failed: {exc}')
 
-            image = self.bridge.imgmsg_to_cv2(
-                msg,
-                desired_encoding='passthrough'
-            )
+    def rgb_info_cb(self, msg):
+        self.rgb_intrinsics = (float(msg.k[0]), float(msg.k[4]), float(msg.k[2]), float(msg.k[5]))
 
-        except Exception as e:
+    def depth_info_cb(self, msg):
+        self.depth_intrinsics = (float(msg.k[0]), float(msg.k[4]), float(msg.k[2]), float(msg.k[5]))
 
-            self.get_logger().error(
-                f'Depth conversion failed: {e}'
-            )
+    def mask_registered_to_cloud(self, cloud_h, cloud_w):
+        """Map each depth/cloud pixel to an RGB mask pixel.
 
-            return
+        This pinhole-only mapping assumes RGB and depth optical frames are co-located
+        and parallel. A non-zero RGB-depth extrinsic requires a true 3-D reprojection.
+        """
+        if self.mask is None:
+            return None
+        mh, mw = self.mask.shape[:2]
+        if self.rgb_intrinsics is None or self.depth_intrinsics is None:
+            if (mh, mw) == (cloud_h, cloud_w):
+                return self.mask > 0
+            import cv2
+            self.get_logger().warning(
+                'CameraInfo not ready: resizing RGB mask to cloud dimensions as a temporary fallback')
+            return cv2.resize(self.mask, (cloud_w, cloud_h), interpolation=cv2.INTER_NEAREST) > 0
 
-        if msg.encoding == '32FC1':
+        rfx, rfy, rcx, rcy = self.rgb_intrinsics
+        dfx, dfy, dcx, dcy = self.depth_intrinsics
+        if min(rfx, rfy, dfx, dfy) <= 0:
+            return None
 
-            image = image.astype(np.float32)
+        uu, vv = np.meshgrid(np.arange(cloud_w, dtype=np.float32),
+                             np.arange(cloud_h, dtype=np.float32))
+        x_norm = (uu - dcx) / dfx
+        y_norm = (vv - dcy) / dfy
+        u_rgb = np.rint(rfx * x_norm + rcx).astype(np.int32)
+        v_rgb = np.rint(rfy * y_norm + rcy).astype(np.int32)
+        valid = (u_rgb >= 0) & (u_rgb < mw) & (v_rgb >= 0) & (v_rgb < mh)
+        registered = np.zeros((cloud_h, cloud_w), dtype=bool)
+        registered[valid] = self.mask[v_rgb[valid], u_rgb[valid]] > 0
+        return registered
 
-        elif msg.encoding == '16UC1':
-
-            image = (
-                image.astype(np.float32)
-                * self.depth_scale
-            )
-
-        else:
-
-            self.get_logger().error(
-                f'Unsupported depth encoding: {msg.encoding}'
-            )
-
-            return
-
-        self.depth_image = image
-
-        self.depth_stamp = (
-            msg.header.stamp.sec
-            + msg.header.stamp.nanosec * 1e-9
-        )
-
-    # ==================================================
-    # RGB Pixel -> Depth Pixel
-    # ==================================================
-
-    def rgb_to_depth_pixel(self, u_rgb, v_rgb):
-
-        if (
-            self.rgb_fx is None
-            or self.depth_fx is None
-        ):
-
-            return None, None
-
-        # RGB 像素坐标转换为归一化坐标
-        x_norm = (
-            u_rgb - self.rgb_cx
-        ) / self.rgb_fx
-
-        y_norm = (
-            v_rgb - self.rgb_cy
-        ) / self.rgb_fy
-
-        # 归一化坐标转换到 Depth 图像
-        u_depth = (
-            self.depth_fx * x_norm
-            + self.depth_cx
-        )
-
-        v_depth = (
-            self.depth_fy * y_norm
-            + self.depth_cy
-        )
-
-        return (
-            int(round(u_depth)),
-            int(round(v_depth))
-        )
-
-    # ==================================================
-    # PointCloud2 -> NumPy
-    # ==================================================
-
-    def pointcloud_to_numpy(self, msg):
-
+    @staticmethod
+    def xyz_from_msg(msg):
+        # ROS 2 Humble-compatible conversion. Keep the organized HxW pixel layout.
         points = point_cloud2.read_points(
-            msg,
-            field_names=('x', 'y', 'z'),
-            skip_nans=False
-        )
-
-        # 兼容不同版本 sensor_msgs_py
+            msg, field_names=('x', 'y', 'z'), skip_nans=False)
         points = np.asarray(points)
-
         if points.dtype.names is not None:
-
-            x = points['x']
-            y = points['y']
-            z = points['z']
-
-            xyz = np.column_stack(
-                (x, y, z)
-            )
-
+            xyz = np.column_stack((points['x'], points['y'], points['z']))
         else:
-
-            xyz = np.asarray(
-                list(points),
-                dtype=np.float32
-            )
-
-        xyz = xyz.astype(
-            np.float32,
-            copy=False
-        )
-
+            xyz = np.asarray(list(points), dtype=np.float32)
+        xyz = np.asarray(xyz, dtype=np.float32).reshape(msg.height, msg.width, 3)
         return xyz
 
-    # ==================================================
-    # PointCloud2 Callback
-    # ==================================================
+    def cloud_cb(self, msg):
+        now = time.monotonic()
+        if now - self.last_process_time < self.process_period:
+            return
+        self.last_process_time = now
 
-    def cloud_callback(self, msg):
+        if self.mask is None or self.mask_header is None:
+            return
+
+        # Reject clearly stale mask/cloud pairs. The two sensors are not guaranteed
+        # to have identical stamps, so allow a configurable tolerance.
+        mask_t = (self.mask_header.stamp.sec +
+                  self.mask_header.stamp.nanosec * 1e-9)
+        cloud_t = (msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        if mask_t > 0.0 and cloud_t > 0.0:
+            if abs(mask_t - cloud_t) > self.max_mask_cloud_dt:
+                return
 
         try:
-
-            xyz = self.pointcloud_to_numpy(msg)
-
-        except Exception as e:
-
-            self.get_logger().error(
-                f'PointCloud2 conversion failed: {e}'
-            )
-
+            organized = self.xyz_from_msg(msg)
+        except Exception as exc:
+            self.get_logger().error(f'PointCloud2 conversion failed: {exc}')
             return
 
-        # 保存点云信息
-        self.cloud_width = msg.width
-        self.cloud_height = msg.height
-
-        self.cloud_frame_id = msg.header.frame_id
-
-        self.cloud_header = msg.header
-
-        self.cloud_stamp = (
-            msg.header.stamp.sec
-            + msg.header.stamp.nanosec * 1e-9
-        )
-
-        # 检查点数
-        if xyz.size == 0:
-
-            self.get_logger().warning(
-                'Empty PointCloud2'
-            )
-
+        h, w, _ = organized.shape
+        target_mask = self.mask_registered_to_cloud(h, w)
+        if target_mask is None:
+            self.get_logger().warning('Waiting for valid RGB/Depth CameraInfo')
             return
 
-        # 检查点云组织形式
-        if xyz.shape[0] != msg.width * msg.height:
-
-            self.get_logger().warning(
-                'PointCloud2 data size mismatch'
-            )
-
+        flat = organized.reshape(-1, 3)
+        ranges = np.linalg.norm(flat, axis=1)
+        valid_scene = (
+            np.isfinite(flat).all(axis=1)
+            & (ranges > 0.05)
+            & (ranges < self.max_depth)
+        )
+        scene_points = flat[valid_scene]
+        if scene_points.shape[0] < 20:
             return
 
-        self.cloud_xyz = xyz.reshape(
-            msg.height,
-            msg.width,
-            3
+        # 1) Full-scene filtering: voxel downsample + statistical outlier removal.
+        scene_pcd = o3d.geometry.PointCloud()
+        scene_pcd.points = o3d.utility.Vector3dVector(scene_points.astype(np.float64))
+        if self.voxel_size > 0:
+            scene_pcd = scene_pcd.voxel_down_sample(self.voxel_size)
+        if len(scene_pcd.points) > max(self.nb_neighbors, 30):
+            scene_pcd, _ = scene_pcd.remove_statistical_outlier(
+                nb_neighbors=self.nb_neighbors, std_ratio=self.std_ratio)
+
+        # 1b) Remove the dominant plane (normally the ground) before obstacle clustering.
+        # The red target extraction below still uses the original organized cloud + MASK.
+        if self.remove_ground_plane and len(scene_pcd.points) >= 100:
+            try:
+                _, inliers = scene_pcd.segment_plane(
+                    distance_threshold=self.plane_distance_threshold,
+                    ransac_n=self.plane_ransac_n,
+                    num_iterations=self.plane_num_iterations)
+                if len(inliers) > 0:
+                    scene_pcd = scene_pcd.select_by_index(inliers, invert=True)
+            except Exception as exc:
+                self.get_logger().warning(f'Ground plane removal skipped: {exc}')
+
+        filtered = np.asarray(scene_pcd.points, dtype=np.float32)
+        if filtered.size:
+            filtered_msg = point_cloud2.create_cloud_xyz32(msg.header, filtered.tolist())
+            self.filtered_cloud_pub.publish(filtered_msg)
+
+        # 2) Target extraction from the full 2-D mask, preserving organized-cloud pixel correspondence.
+        target_points = organized[target_mask]
+        target_ranges = np.linalg.norm(target_points, axis=1)
+        target_valid = (
+            np.isfinite(target_points).all(axis=1)
+            & (target_ranges > 0.05)
+            & (target_ranges < self.max_depth)
         )
-
-        # Open3D 可视化
-        if self.vis is not None:
-
-            self.update_visualization(xyz)
-
-        # 提取障碍物点云
-        self.process_target()
-
-    # ==================================================
-    # Open3D Visualization
-    # ==================================================
-
-    def update_visualization(self, xyz):
-
-        valid = np.isfinite(xyz).all(axis=1)
-
-        valid_points = xyz[valid]
-
-        if valid_points.shape[0] == 0:
+        target_points = target_points[target_valid]
+        if target_points.shape[0] < self.min_target_points:
+            self.publish_delete_target_marker(msg.header)
             return
 
-        # 创建临时点云
-        temp_pcd = o3d.geometry.PointCloud()
 
-        temp_pcd.points = o3d.utility.Vector3dVector(
-            valid_points
-        )
 
-        # 降采样，减少显示压力
-        temp_pcd = temp_pcd.voxel_down_sample(
-            voxel_size=self.voxel_size
-        )
-
-        self.pending_points = np.asarray(
-            temp_pcd.points
-        )
-
-        self.pending_visualization = True
-
-    def visualization_callback(self):
-
-        if self.vis is None:
+        # 点云数量
+        if len(object_points) < 200:
+            self.publish_delete_target_marker(msg.header)
             return
-
-        if self.pending_visualization:
-
-            points = self.pending_points
-
-            self.pcd.points = o3d.utility.Vector3dVector(
-                points
-            )
-
-            if not self.geometry_added:
-
-                self.vis.add_geometry(
-                    self.pcd
-                )
-
-                self.geometry_added = True
-
-            else:
-
-                self.vis.update_geometry(
-                    self.pcd
-                )
-
-            self.pending_visualization = False
-
-        try:
-
-            self.vis.poll_events()
-
-            self.vis.update_renderer()
-
-        except Exception as e:
-
-            self.get_logger().warning(
-                f'Open3D update failed: {e}'
-            )
-
-            self.vis = None
-
-    # ==================================================
-    # RGB-D Method
-    # ==================================================
-
-    def calculate_rgbd_position(self, u, v):
-
-        if self.depth_image is None:
-            return None
-
-        height, width = self.depth_image.shape
-
-        if not (
-            0 <= u < width
-            and 0 <= v < height
-        ):
-
-            return None
-
-        r = self.roi_radius
-
-        u1 = max(0, u - r)
-        u2 = min(width, u + r + 1)
-
-        v1 = max(0, v - r)
-        v2 = min(height, v + r + 1)
-
-        roi = self.depth_image[
-            v1:v2,
-            u1:u2
-        ]
-
-        valid = roi[
-            np.isfinite(roi)
-            & (roi > 0.0)
-        ]
-
-        # if valid.size == 0:
-        #     return None
-
-        if valid.size == 0:
-            self.get_logger().warning(
-                f'No valid depth around '
-                f'pixel ({u},{v})')
-            return
-
-        Z = float(np.median(valid))
-
-        X = (
-            (u - self.depth_cx)
-            * Z / self.depth_fx
-        )
-
-        Y = (
-            (v - self.depth_cy)
-            * Z / self.depth_fy
-        )
-
-        return np.array(
-            [X, Y, Z],
-            dtype=np.float32
-        )
-
-    # ==================================================
-    # PointCloud2 Target Extraction
-    # ==================================================
-
-    def extract_target_points(self, u, v):
-
-        if self.cloud_xyz is None:
-            return None
-
-        height, width, _ = self.cloud_xyz.shape
-
-        # 确保点云与 Depth 图像分辨率一致
-        if self.depth_image is None:
-            return None
-
-        depth_height, depth_width = self.depth_image.shape
-
-        if (
-            width != depth_width
-            or height != depth_height
-        ):
-
-            self.get_logger().warning(
-                'PointCloud2 and Depth Image dimensions '
-                'do not match. Cannot directly index cloud.'
-            )
-
-            return None
-
-        r = self.roi_radius
-
-        u1 = max(0, u - r)
-        u2 = min(width, u + r + 1)
-
-        v1 = max(0, v - r)
-        v2 = min(height, v + r + 1)
-
-        roi = self.cloud_xyz[
-            v1:v2,
-            u1:u2,
-            :
-        ]
-
-        points = roi.reshape(-1, 3)
-
-        # 过滤无效点
-        valid = (
-            np.isfinite(points).all(axis=1)
-            & (points[:, 2] > 0.0)
-        )
-
-        points = points[valid]
-
-        if points.shape[0] == 0:
-            return None
-
-        return points
-
-    # ==================================================
-    # Publish Point
-    # ==================================================
-
-    def publish_point(self, point, topic_type):
-
-        msg = PointStamped()
-
-        msg.header = self.cloud_header
-
-        msg.point.x = float(point[0])
-        msg.point.y = float(point[1])
-        msg.point.z = float(point[2])
-
-        if topic_type == 'cloud':
-
-            self.cloud_point_pub.publish(msg)
-
-        elif topic_type == 'rgbd':
-
-            self.rgbd_point_pub.publish(msg)
-
-    # ==================================================
-    # Publish Marker
-    # ==================================================
-
-    def publish_marker(self, point):
-
-        marker = Marker()
-
-        marker.header = self.cloud_header
-
-        marker.ns = 'red_box'
-        marker.id = 0
-
-        marker.type = Marker.SPHERE
-
-        marker.action = Marker.ADD
-
-        marker.pose.position.x = float(point[0])
-        marker.pose.position.y = float(point[1])
-        marker.pose.position.z = float(point[2])
-
-        marker.pose.orientation.w = 1.0
-
-        marker.scale.x = 0.12
-        marker.scale.y = 0.12
-        marker.scale.z = 0.12
-
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0
-
-        marker.lifetime.sec = 0
-
-        self.marker_pub.publish(marker)
-
-    # ==================================================
-    # Main Target Processing
-    # ==================================================
-
-    def process_target(self):
-
-        # 检查必要数据
-        # if (
-        #     self.pixel_u is None
-        #     or self.cloud_xyz is None
-        #     or self.depth_image is None
-        #     or self.rgb_fx is None
-        #     or self.depth_fx is None
-        # ):
-
+        # 尺寸异常检查
+        # 还有待商榷，因为比如朝向正面，那就会丢失长度x的信息，变成0.01
+        # 怎么加入一个目标有效状态话题，eg. /reb_box/valid, 消息类型可以是std_msgs/Bool
+        # if np.any(size < 0.05):
+        #     self.publish_delete_target_marker(msg.header)
         #     return
 
-        if self.pixel_u is None:
 
-            self.get_logger().warning(
-                'Waiting for RGB detection result'
-            )
 
+        target_pcd = o3d.geometry.PointCloud()
+        target_pcd.points = o3d.utility.Vector3dVector(target_points.astype(np.float64))
+        if self.voxel_size > 0:
+            target_pcd = target_pcd.voxel_down_sample(max(self.voxel_size * 0.5, 0.01))
+        if len(target_pcd.points) > max(self.nb_neighbors, 30):
+            target_pcd, _ = target_pcd.remove_statistical_outlier(
+                nb_neighbors=min(self.nb_neighbors, max(5, len(target_pcd.points)-1)),
+                std_ratio=self.std_ratio)
+        target_filtered = np.asarray(target_pcd.points, dtype=np.float32)
+        if target_filtered.shape[0] < self.min_target_points:
+            self.publish_delete_target_marker(msg.header)
             return
 
-        if self.cloud_xyz is None:
+        # 3) DBSCAN on target points. Select the largest non-noise cluster.
+        labels = np.asarray(target_pcd.cluster_dbscan(
+            eps=self.target_eps, min_points=self.target_min_points, print_progress=False))
+        valid_labels = labels[labels >= 0]
+        if valid_labels.size:
+            ids, counts = np.unique(valid_labels, return_counts=True)
+            chosen = int(ids[np.argmax(counts)])
+            object_points = target_filtered[labels == chosen]
+        else:
+            # Robust fallback for sparse/noisy targets; still publish only if enough points exist.
+            # object_points = target_filtered
 
-            self.get_logger().warning(
-                'Waiting for PointCloud2'
-            )
 
+            self.publish_delete_target_marker(msg.header)
             return
 
-        if self.depth_image is None:
 
-            self.get_logger().warning(
-                'Waiting for Depth Image'
-            )
 
+        
+        if object_points.shape[0] < self.min_target_points:
+            self.publish_delete_target_marker(msg.header)
             return
 
-        if self.rgb_fx is None or self.depth_fx is None:
+        # Percentile bounds reduce the influence of a few residual edge outliers.
+        lower = np.percentile(object_points, 2.0, axis=0)
+        upper = np.percentile(object_points, 98.0, axis=0)
+        center = (lower + upper) * 0.5
+        size = np.maximum(upper - lower, 0.01)
 
-            self.get_logger().warning(
-                'Waiting for CameraInfo'
-            )
+        pos_msg = PointStamped()
+        pos_msg.header = msg.header
+        pos_msg.point.x, pos_msg.point.y, pos_msg.point.z = map(float, center)
+        self.position_pub.publish(pos_msg)
 
-            return
+        size_msg = Vector3Stamped()
+        size_msg.header = msg.header
+        size_msg.vector.x, size_msg.vector.y, size_msg.vector.z = map(float, size)
+        self.size_pub.publish(size_msg)
 
-        # 检查坐标系
-        if (
-            self.depth_frame_id
-            and self.cloud_frame_id
-            and self.depth_frame_id != self.cloud_frame_id
-        ):
+        target_msg = point_cloud2.create_cloud_xyz32(msg.header, object_points.tolist())
+        self.target_cloud_pub.publish(target_msg)
+        self.publish_target_marker(msg.header, center, size)
 
-            self.get_logger().warning(
-                f'Frame mismatch: '
-                f'Depth={self.depth_frame_id}, '
-                f'Cloud={self.cloud_frame_id}. '
-                f'Please transform before comparison.'
-            )
+        # 4) Whole-scene DBSCAN for other visible clusters / obstacles.
+        if self.publish_scene_clusters and filtered.shape[0] >= self.min_cluster_points:
+            self.publish_scene_dbscan(msg.header, filtered)
 
-            return
-
-        # RGB 像素 -> Depth 像素
-        u, v = self.rgb_to_depth_pixel(
-            self.pixel_u,
-            self.pixel_v
-        )
-
-        if u is None:
-            return
-
-        height, width = self.depth_image.shape
-
-        if not (
-            0 <= u < width
-            and 0 <= v < height
-        ):
-            return
-
-        # ==========================================
-        # 方法1：RGB-D
-        # ==========================================
-
-        rgbd_point = self.calculate_rgbd_position(
-            u, v
-        )
-
-        if rgbd_point is None:
-            return
-
-        # ==========================================
-        # 方法2：PointCloud2
-        # ==========================================
-
-        target_points = self.extract_target_points(
-            u, v
-        )
-
-        if target_points is None:
-            return
-
-        # 对目标区域点云取中值
-        cloud_point = np.median(
-            target_points,
-            axis=0
-        )
-
-
-        # ********** 
-        # ==========================================
-        # 坐标系转换
-        # RGB-D: Optical Frame
-        # PointCloud2: Camera Frame
-        # ==========================================
-
-        # Optical -> Camera
-        rgbd_point_camera = np.array([
-            rgbd_point[2],
-            -rgbd_point[0],
-            -rgbd_point[1]
-        ], dtype=np.float32)
-
-        # ==========================================
-        # 坐标比较
-        # ==========================================
-
-        error = np.linalg.norm(
-            cloud_point - rgbd_point_camera
-        )
-
-        # 发布坐标
-        self.publish_point(
-            cloud_point,
-            'cloud'
-        )
-
-        self.publish_point(
-            # rgbd_point,
-            rgbd_point_camera, 
-            'rgbd'
-        )
-
-        self.publish_marker(
-            cloud_point
-        )
-
-        # ==========================================
-        # 输出日志
-        # ==========================================
-
-        now = self.get_clock().now().nanoseconds / 1e9
-
-        if now - self.last_log_time >= 1.0:
-
+        self.pending_scene = filtered
+        if now - self.last_log_time > 1.0:
             self.get_logger().info(
-                '\n========== RGB-D vs PointCloud ==========\n'
-                f'RGB Pixel: '
-                f'({self.pixel_u}, {self.pixel_v})\n'
-                f'Depth Pixel: ({u}, {v})\n'
-                f'Cloud Points: {len(target_points)}\n\n'
-
-                f'RGB-D Optical Position:\n'
-                f'X={rgbd_point[0]:.3f}, '
-                f'Y={rgbd_point[1]:.3f}, '
-                f'Z={rgbd_point[2]:.3f}\n\n'
-
-                f'RGB-D Camera Position:\n'
-                f'X={rgbd_point_camera[0]:.3f}, '
-                f'Y={rgbd_point_camera[1]:.3f}, '
-                f'Z={rgbd_point_camera[2]:.3f}\n\n'
-
-                f'PointCloud Position:\n'
-                f'X={cloud_point[0]:.3f}, '
-                f'Y={cloud_point[1]:.3f}, '
-                f'Z={cloud_point[2]:.3f}\n\n'
-
-                f'Euclidean Error: {error:.4f} m\n'
-                '========================================='
-            )
-
+                f'Target points={len(object_points)}, center='
+                f'({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}), '
+                f'size=({size[0]:.2f}, {size[1]:.2f}, {size[2]:.2f}), '
+                f'filtered scene points={len(filtered)}')
             self.last_log_time = now
 
-    # ==================================================
-    # Shutdown
-    # ==================================================
+    def publish_target_marker(self, header, center, size):
+        marker = Marker()
+        marker.header = header
+        marker.ns = 'red_box'
+        marker.id = 0
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = map(float, center)
+        marker.pose.orientation.w = 1.0
+        marker.scale.x, marker.scale.y, marker.scale.z = map(float, size)
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = 1.0, 0.05, 0.05, 0.45
+        marker.lifetime.sec = 1
+        self.marker_pub.publish(marker)
+
+    def publish_delete_target_marker(self, header):
+        marker = Marker()
+        marker.header = header
+        marker.ns = 'red_box'
+        marker.id = 0
+        marker.action = Marker.DELETE
+        self.marker_pub.publish(marker)
+
+    def publish_scene_dbscan(self, header, points):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+        labels = np.asarray(pcd.cluster_dbscan(
+            eps=self.scene_eps, min_points=self.scene_min_points, print_progress=False))
+        marker_array = MarkerArray()
+        cluster_ids = [int(x) for x in np.unique(labels) if x >= 0]
+        palette = [
+            (0.1, 0.8, 0.2), (0.1, 0.4, 1.0), (1.0, 0.6, 0.0),
+            (0.8, 0.2, 0.8), (0.0, 0.8, 0.8), (1.0, 1.0, 0.1)
+        ]
+        for idx, cid in enumerate(cluster_ids[:30]):
+            cluster = points[labels == cid]
+            if len(cluster) < self.min_cluster_points:
+                continue
+            lo, hi = np.percentile(cluster, [2, 98], axis=0)
+            c = (lo + hi) * 0.5
+            s = np.maximum(hi - lo, 0.03)
+            marker = Marker()
+            marker.header = header
+            marker.ns = 'scene_clusters'
+            marker.id = idx
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+            marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = map(float, c)
+            marker.pose.orientation.w = 1.0
+            marker.scale.x, marker.scale.y, marker.scale.z = map(float, s)
+            color = palette[idx % len(palette)]
+            marker.color.r, marker.color.g, marker.color.b, marker.color.a = *color, 0.35
+            marker.lifetime.sec = 1
+            marker_array.markers.append(marker)
+
+        # Explicitly delete old IDs when fewer clusters are present this frame.
+        for idx in range(len(cluster_ids[:30]), 30):
+            marker = Marker()
+            marker.header = header
+            marker.ns = 'scene_clusters'
+            marker.id = idx
+            marker.action = Marker.DELETE
+            marker_array.markers.append(marker)
+        self.cluster_marker_pub.publish(marker_array)
+
+    def visualization_spin(self):
+        if self.vis is None:
+            return
+        if self.pending_scene is not None and len(self.pending_scene):
+            self.vis_cloud.points = o3d.utility.Vector3dVector(self.pending_scene.astype(np.float64))
+            if not self.vis_geometries:
+                self.vis.add_geometry(self.vis_cloud)
+                self.vis_geometries.append(True)
+            else:
+                self.vis.update_geometry(self.vis_cloud)
+            self.pending_scene = None
+        try:
+            self.vis.poll_events()
+            self.vis.update_renderer()
+        except Exception as exc:
+            self.get_logger().warning(f'Open3D visualizer stopped: {exc}')
+            self.vis = None
 
     def destroy_node(self):
-
         if self.vis is not None:
-
             self.vis.destroy_window()
-
         super().destroy_node()
 
 
 def main(args=None):
-
     rclpy.init(args=args)
-
     node = PointCloudProcessorNode()
-
     try:
-
         rclpy.spin(node)
-
     except KeyboardInterrupt:
-
         pass
-
     finally:
-
         node.destroy_node()
-
         rclpy.shutdown()
 
 
 if __name__ == '__main__':
-
     main()
