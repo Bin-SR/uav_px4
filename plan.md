@@ -153,6 +153,8 @@ PointCloud Processor Node的改进版本：
 实验6的初步运行：
 `PX4_GZ_WORLD=default2_experiment6 make px4_sitl gz_x500_depth`  
 `ros2 launch uav_rgbd_perception experiment6.launch.py`  
+注意，在gz和ros2桥接的时候，路径中的worl名称: default, default2, default2_experiment6  
+如果make启动仿真时的PX4_GZ_WORLD和sdf文件中的world名称，以及桥接时的world名称不统一，运行脚本时就会出现Python3无响应
 终端打印数据分析：  
 ```
 在default2_experiment6.sdf描述世界的文件中，定义红色箱子<size>0.85 0.85 1.20</size>, 即标准长宽高为0.85*0.85*1.20
