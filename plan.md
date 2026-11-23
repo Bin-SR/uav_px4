@@ -193,6 +193,47 @@ PointCloud Processor Node的改进版本：
 一种简单的转换关系：$P_{world}=T_{world}^{camera}P_{camera}$, 其中 $T_{world}^{camera}=T_{world}^{body}T_{body}^{camera}$  
 验收标准：无人机在Gazebo中运动，目标在世界坐标系下的位置应该保持不变  
 
+
+
+
+### 1.4 使用目标识别模型  
+YOLO/DINO等，这些包含了物体的语义信息(class)  
+构建物体的场景描述，使用JSON格式，如：  
+```
+{
+    "object_id": 1,
+    "class": "chair",
+    "confidence": 0.95,
+    "position_camera": [1.2, 0.3, 4.0],
+    "position_world": [5.2, 2.3, 0.0],
+    "size": [0.6, 0.6, 1.0],
+    "coordinate_frame": "world"
+}
+```
+包含无人机的状态信息的JSON：    
+```
+{
+    "drone": {
+        "position_world": [2.0, 1.0, 3.0],
+        "velocity_world": [0.0, 0.0, 0.0],
+        "yaw": 0.0
+    },
+    "objects": [
+        {
+            "id": 1,
+            "class": "chair",
+            "position_world": [5.0, 4.0, 0.0],
+            "size": [0.6, 0.6, 1.0]
+        }
+    ]
+}
+```
+
+
+
+
+
+
 ## 阶段2：使用VLM  
 ### 2.1 Qwen3-VL  
 ### 2.2 Grounding DINE + SAM2  
@@ -200,6 +241,12 @@ PointCloud Processor Node的改进版本：
 
 ## 阶段3：VLM + RGB-D，真正实现多模态场景理解  
 **注意：** 不要直接把 RGB、Depth 和 PointCloud 全部扔给 VLM，而是先使用几何算法**提取结构化信息**，再交给 VLM 进行语义推理  
+
+**问题：** VLM 应该接收什么数据?  
+假如当前已知：椅子这个类别，椅子的二维bbox，三维点云，三维包围盒，盒中心世界坐标，无人机世界坐标以及位姿  
+
+
+
 
 
 ## 阶段4：引入 Agent，让无人机能够自主完成任务  
