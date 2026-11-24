@@ -1,0 +1,50 @@
+obj_detector_node:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    model_path: yolo11n.pt
+    # target_class: "sports ball"
+    target_class: "orange"
+    # confidence_threshold: 0.35
+    confidence_threshold: 0.10
+    iou_threshold: 0.45
+    image_size: 640
+    process_hz: 8.0
+    show_window: true
+    device: ""
+
+pointcloud_processor_node:
+  ros__parameters:
+    voxel_size: 0.025
+    statistical_nb_neighbors: 20
+    statistical_std_ratio: 2.0
+    remove_ground_plane: true
+    plane_distance_threshold: 0.06
+    plane_ransac_n: 3
+    plane_num_iterations: 100
+    target_dbscan_eps: 0.12
+    target_dbscan_min_points: 6
+    scene_dbscan_eps: 0.18
+    scene_dbscan_min_points: 10
+    min_target_points: 20
+    min_cluster_points: 20
+    max_depth: 12.0
+    process_hz: 2.0
+    max_mask_cloud_dt: 0.35
+    visualize_open3d: false
+    publish_scene_clusters: true
+
+world_state_node:
+  ros__parameters:
+    position_topic: /red_box/position
+    size_topic: /red_box/size
+    local_position_topic: /fmu/out/vehicle_local_position_v1
+    odometry_topic: /fmu/out/vehicle_odometry
+    world_state_topic: /uav/world_state
+    camera_frame: camera_link
+    world_frame: map_enu
+    camera_translation_flu: [0.12, 0.03, 0.242]
+    object_class: "sports ball"
+    object_confidence: 0.0
+    object_timeout_sec: 1.5
+    publish_hz: 5.0
+    pose_frame_ned_value: 1

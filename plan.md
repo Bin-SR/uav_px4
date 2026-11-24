@@ -191,12 +191,25 @@ PointCloud Processor Node的改进版本：
 ### 1.3 相机坐标系到无人机世界坐标系的转换  
 无人机需要目标物体在世界坐标系中的位置  
 一种简单的转换关系：$P_{world}=T_{world}^{camera}P_{camera}$, 其中 $T_{world}^{camera}=T_{world}^{body}T_{body}^{camera}$  
+在PX4-Autopilot/Tools/simulation/gz/models/x500_depth/model.sdf, 描述了相机在机体的位置  
+`<pose relative_to="base_link"> .12 .03 .242 0 0 0 </pose>`  
+$
+T_{body}^{camera}=
+\begin{bmatrix}
+1&0&0&0.12\\
+0&1&0&0.03\\
+0&0&1&0.242\\
+0&0&0&1
+\end{bmatrix}
+$  
+
 验收标准：无人机在Gazebo中运动，目标在世界坐标系下的位置应该保持不变  
 
 
 
 
 ### 1.4 使用目标识别模型  
+**实验7(experiment7)**
 YOLO/DINO等，这些包含了物体的语义信息(class)  
 构建物体的场景描述，使用JSON格式，如：  
 ```
@@ -227,8 +240,34 @@ YOLO/DINO等，这些包含了物体的语义信息(class)
         }
     ]
 }
+```  
+用`obj_detector_node`来替换`rgb_detector_node`，负责检测和生成目标 Mask/BBox  
+`pointcloud_processor_node`负责三维几何  
+`world_state_node`负责坐标转换和场景信息整合(JSON)  
+运行launch文件，启动experiment7:  
 ```
+# 使用的是default2_ball世界
+PX4_GZ_WORLD=default2_ball make px4_sitl gz_x500_depth
+ros2 launch uav_rgbd_perception experiment7.launch.py
+```  
+启动launch后，应该可以看到的日志打印信息  
+```
+[obj_detector-1] [INFO] [1795534858.112166389] [obj_detector_node]: YOLO detections: orange: 0.801
+[pointcloud_processor-3] [INFO] [1795534858.250765947] [pointcloud_processor_node]: Target points=721, center=(7.77, 0.09, 0.08), size=(0.33, 0.63, 0.66), filtered scene points=781
+[obj_detector-1] [INFO] [1795534858.287774319] [obj_detector_node]: YOLO detections: orange: 0.801
+```  
+检查其他话题的情况：  
+```
+ros2 topic echo /red_box/bbox --once
+ros2 topic echo /red_box/center_pixel --once
+ros2 topic hz /red_box/mask
 
+ros2 topic echo /red_box/position
+ros2 topic echo /red_box/size
+ros2 topic hz /red_box/points
+
+ros2 topic echo /uav/world_state
+```
 
 
 

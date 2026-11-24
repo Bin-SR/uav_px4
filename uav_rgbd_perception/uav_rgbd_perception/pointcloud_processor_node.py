@@ -237,9 +237,9 @@ class PointCloudProcessorNode(Node):
 
 
         # 点云数量
-        if len(object_points) < 200:
-            self.publish_delete_target_marker(msg.header)
-            return
+        # if len(object_points) < 200:
+        #     self.publish_delete_target_marker(msg.header)
+        #     return
         # 尺寸异常检查
         # 还有待商榷，因为比如朝向正面，那就会丢失长度x的信息，变成0.01
         # 怎么加入一个目标有效状态话题，eg. /reb_box/valid, 消息类型可以是std_msgs/Bool
@@ -251,6 +251,24 @@ class PointCloudProcessorNode(Node):
 
         target_pcd = o3d.geometry.PointCloud()
         target_pcd.points = o3d.utility.Vector3dVector(target_points.astype(np.float64))
+
+        # YOLO provides a rectangular 2-D box, so its mask can include ground
+        # pixels. For the sphere experiment, remove a dominant plane from this
+        # cropped target cloud before clustering. This is configurable because
+        # planar targets may need this disabled in later experiments.
+        try:
+            if len(target_pcd.points) >= 80:
+                _, target_plane_inliers = target_pcd.segment_plane(
+                    distance_threshold=0.035,
+                    ransac_n=3,
+                    num_iterations=120)
+                plane_ratio = len(target_plane_inliers) / float(len(target_pcd.points))
+                if len(target_plane_inliers) >= 30 and plane_ratio < 0.85:
+                    target_pcd = target_pcd.select_by_index(
+                        target_plane_inliers, invert=True)
+        except Exception as exc:
+            self.get_logger().warning(f'Target plane removal skipped: {exc}')
+
         if self.voxel_size > 0:
             target_pcd = target_pcd.voxel_down_sample(max(self.voxel_size * 0.5, 0.01))
         if len(target_pcd.points) > max(self.nb_neighbors, 30):
@@ -271,12 +289,11 @@ class PointCloudProcessorNode(Node):
             chosen = int(ids[np.argmax(counts)])
             object_points = target_filtered[labels == chosen]
         else:
-            # Robust fallback for sparse/noisy targets; still publish only if enough points exist.
-            # object_points = target_filtered
-
-
-            self.publish_delete_target_marker(msg.header)
-            return
+            # If DBSCAN finds no cluster, retain the filtered target points as a
+            # conservative fallback. This is preferable to leaving object_points
+            # undefined; the downstream world-state node still applies freshness
+            # and finite/positive-size checks.
+            object_points = target_filtered
 
 
 
@@ -321,7 +338,7 @@ class PointCloudProcessorNode(Node):
     def publish_target_marker(self, header, center, size):
         marker = Marker()
         marker.header = header
-        marker.ns = 'red_box'
+        marker.ns = 'detected_target'
         marker.id = 0
         marker.type = Marker.CUBE
         marker.action = Marker.ADD
@@ -335,7 +352,7 @@ class PointCloudProcessorNode(Node):
     def publish_delete_target_marker(self, header):
         marker = Marker()
         marker.header = header
-        marker.ns = 'red_box'
+        marker.ns = 'detected_target'
         marker.id = 0
         marker.action = Marker.DELETE
         self.marker_pub.publish(marker)

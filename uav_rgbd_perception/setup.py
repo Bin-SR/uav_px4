@@ -31,6 +31,8 @@ setup(
             'rgb_detector         = uav_rgbd_perception.rgb_detector_node:main',
             'depth_processor      = uav_rgbd_perception.depth_processor_node:main',
             'pointcloud_processor = uav_rgbd_perception.pointcloud_processor_node:main',
+            'obj_detector         = uav_rgbd_perception.obj_detector_node:main',
+            'world_state          = uav_rgbd_perception.world_state_node:main',
         ],
     },
 )

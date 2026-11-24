@@ -309,6 +309,7 @@ RGB中，height: 1080, width: 1920
 Depth中，height: 480, width: 640, encoding: 32FC1
 运行报错：中心点坐标超过了Depth图像的分辨率  
 RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info  
+**这是相机的内参**  
 | 参数 | RGB | Depth |
 |---|---|---|
 | Width | 1920 | 640 |
@@ -319,7 +320,7 @@ RGB相机对应的是IMX214/camera_info， Depth相机对应的是/camera_info
 | cy | 540 | 240 |   
 
 对两个info进行桥接，RGB->/camera/camera_info, Depth->/camera/depth/camera_info  
-在depth_processor_node.py中通过rgb_to_depth_pixel函数，把RGB图像中的坐标，映射到Depth图像中  
+在depth_processor_node.py中通过`rgb_to_depth_pixel`函数，把RGB图像中的坐标，映射到Depth图像中  
 
 **问题2：RGBD 和 PointCloud得到的两组坐标不一致**  
 如，在地面上，  
@@ -369,10 +370,10 @@ PiontCloud的坐标：`(x, y, z) = (4.33, 0.00, 0.71)`
 ```
 , 然后由任务执行器将这些任务转化为具体的 ROS2 指令。
 ## 问题解决：
- ### 1.启动make px4_sitl gz_x500后，没有打开Gazebo的UI界面：
+### 1.启动make px4_sitl gz_x500后，没有打开Gazebo的UI界面：
   新开启一个终端，输入：`gz sim -g`，如果正常打开，那就是有残留进程  
   查看残留进程：`pgrep -af 'gz|gazebo'`, 清理：`kill <PID号>`  
- ### 2.ROS2的话题，echo无效：
+### 2.ROS2的话题，echo无效：
 指令：`ros2 topic echo /fmu/out/vehicle_global_position `  
 输出：`The message type 'px4_msgs/msg/VehicleGlobalPosition' is invalid`  
 解决：在`~/uav/learn/`中创建`ws`工作空间，克隆px4_msgs源码再编译  
@@ -388,7 +389,10 @@ source ~/uav/learn/ws/install/setup.bash          # source一下新的px4_msgs
 ros2 pkg list | grep px4_msgs                     # 验证消息类型
 ros2 interface show px4_msgs/msg/VehicleAttitude
 ros2 topic echo /fmu/out/vehicle_attitude
-```
+```  
+
+### 3.colcon的pkg，运行ROS2 launch使用的python解释器混乱问题  
+
 
 
 RGB_TOPIC='/world/default2/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
@@ -409,6 +413,27 @@ ros2 run ros_gz_bridge parameter_bridge \
   -r /depth_camera:=/camera/depth/image_raw \
   -r /depth_camera/points:=/camera/depth/points \
   -r /world/default2/clock:=/clock
+
+
+RGB_TOPIC='/world/default2_ball/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
+RGB_CAMERA_INFO_TOPIC='/world/default2_ball/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
+DEPTH_CAMERA_INFO_TOPIC='/camera_info'
+
+ros2 run ros_gz_bridge parameter_bridge \
+  "${RGB_TOPIC}@sensor_msgs/msg/Image[gz.msgs.Image" \
+  "${RGB_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  "${DEPTH_CAMERA_INFO_TOPIC}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+  '/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image' \
+  '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked' \
+  '/world/default2_ball/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock' \
+  --ros-args \
+  -r "${RGB_TOPIC}:=/camera/image_raw" \
+  -r "${RGB_CAMERA_INFO_TOPIC}:=/camera/camera_info" \
+  -r "${DEPTH_CAMERA_INFO_TOPIC}:=/camera/depth/camera_info" \
+  -r /depth_camera:=/camera/depth/image_raw \
+  -r /depth_camera/points:=/camera/depth/points \
+  -r /world/default2_ball/clock:=/clock
+
 
 RGB_TOPIC='/world/default2_experiment6/model/x500_depth_0/link/camera_link/sensor/IMX214/image'
 RGB_CAMERA_INFO_TOPIC='/world/default2_experiment6/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info'
